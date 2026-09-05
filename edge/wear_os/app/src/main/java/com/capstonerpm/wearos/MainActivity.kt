@@ -1,20 +1,25 @@
 package com.capstonerpm.wearos
 
 import android.Manifest
-import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
 /**
  * Requests the runtime permissions SensorGattServerService needs, then starts it.
  * No UI beyond that -- this app has no reason to be opened after setup; it should
  * just keep the foreground service alive.
+ *
+ * ComponentActivity (not plain Activity): registerForActivityResult /
+ * ActivityResultContracts are AndroidX's replacement for the deprecated
+ * onRequestPermissionsResult callback and only exist on ComponentActivity and its
+ * subclasses (found by actually compiling this against the AndroidX Activity Result
+ * API -- plain Activity does not have `registerForActivityResult`).
  */
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
 
     private val requiredPermissions = arrayOf(
         Manifest.permission.BODY_SENSORS,

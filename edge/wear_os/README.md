@@ -5,18 +5,46 @@ them over BLE to `edge/edge_agent/`.
 
 ## Honest status
 
-**This has not been built or run.** This development environment has no Android SDK,
-no Gradle, no Android/Wear OS emulator, and no physical watch — there is no toolchain
-here capable of compiling or executing it. What follows is a structurally complete
-Kotlin/Gradle scaffold: real Android APIs used correctly, matching exactly the wire
-contract `edge/edge_agent/protocol.py` already implements and is tested against — but
-it is unverified beyond compiling correctly. Treat it as a reviewed starting point for
-whoever builds this in Android Studio, not as tested code.
+**Built and run — on the Wear OS emulator, not a physical watch.** Once Android
+Studio's SDK was available, this was verified for real, not just reviewed:
+
+- `sdkmanager` installed a Wear OS 5 (API 34, arm64) system image; `avdmanager`
+  created an AVD (`wear_test`); the Gradle wrapper was generated
+  (`gradle wrapper --gradle-version 8.10.2`) against this project.
+- `./gradlew assembleDebug` builds a debug APK. Two real bugs surfaced and were
+  fixed by actually compiling, not by inspection: `android.useAndroidX=true` was
+  missing from `gradle.properties`, and `MainActivity` extended plain `Activity`
+  instead of `androidx.activity.ComponentActivity` (`registerForActivityResult` only
+  exists on the latter). A placeholder adaptive-icon resource was also added — the
+  manifest referenced `@mipmap/ic_launcher`, which didn't exist yet.
+- Installed and launched on the booted emulator (`adb install` / `adb shell am
+  start`). A **third** real bug surfaced only at runtime, not at compile time: the
+  app crashed with `SerializationException: Serializer for class 'WatchBatch' is not
+  found` — the `kotlinx-serialization-json` runtime library was declared, but the
+  `org.jetbrains.kotlin.plugin.serialization` **compiler plugin**, which is what
+  actually generates `@Serializable` serializers, was never applied. Fixed in both
+  `build.gradle.kts` files.
+- After that fix: permissions granted (`adb shell pm grant`), the app launched,
+  `SensorGattServerService` started as a foreground service and stayed alive and
+  crash-free across multiple `SAMPLE_WINDOW_S` (10 s) batch-emission cycles
+  (confirmed via `dumpsys activity services` and a clean `logcat` with zero
+  `FATAL EXCEPTION` occurrences after the fix).
+
+**What is still unverified:** BLE GATT central/peripheral pairing end-to-end. The
+Wear OS emulator's Bluetooth stack does not reliably support peripheral-mode GATT
+advertising, so this run could not confirm that `edge/edge_agent/transport.py`'s
+`BleTransport` (real hardware, a real central) actually receives a notification from
+this service — only that the service constructs its `BluetoothGattServer` and
+`AdvertiseCallback` without throwing. `startAdvertising`'s null-safe call
+(`advertiser?.startAdvertising(...)`) means the app degrades safely if the
+emulator's virtual adapter has no advertiser at all, rather than crashing. Confirming
+the actual notification hand-off needs a physical Wear OS watch and a BLE-capable
+central, neither available here.
 
 The `edge/edge_agent/` side of this link is real, tested Python (see its own tests):
 `BleTransport` in `edge/edge_agent/transport.py` will connect to this app's GATT
-characteristic once it exists on real hardware, using the exact UUIDs and JSON batch
-shape defined in `edge/edge_agent/protocol.py`.
+characteristic on real hardware, using the exact UUIDs and JSON batch shape defined
+in `edge/edge_agent/protocol.py`.
 
 ## What it does
 

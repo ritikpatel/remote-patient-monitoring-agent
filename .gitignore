@@ -40,6 +40,18 @@ mlartifacts/
 *.key
 kubeconfig*
 
+# --- Android / Gradle (edge/wear_os) ---
+# gradlew, gradlew.bat and gradle/wrapper/gradle-wrapper.jar ARE committed (standard
+# practice) so the project builds without a pre-installed Gradle. Everything below is
+# machine-specific or regenerable.
+edge/wear_os/local.properties
+edge/wear_os/**/build/
+edge/wear_os/.gradle/
+edge/wear_os/**/.cxx/
+edge/wear_os/captures/
+*.apk
+*.ap_
+
 # --- OS / editor ---
 .DS_Store
 .idea/

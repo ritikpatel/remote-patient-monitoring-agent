@@ -38,7 +38,7 @@ without one, everything lands in `--outbox` and the CLI says so.
 | `protocol.py`, `features.py`, `outbox.py`, `mqtt_publisher.py`, `agent.py` | Real, tested Python (`edge/edge_agent/tests/`) |
 | `transport.ReplayTransport` | Real, is what every test above actually runs against |
 | `transport.BleTransport` | Real `bleak`-based BLE GATT central code, never run end-to-end here -- no BLE hardware or paired watch in this environment |
-| `edge/wear_os/` (the watch app) | Structurally complete Kotlin/Gradle scaffold, never compiled -- no Android toolchain here. See its own README. |
+| `edge/wear_os/` (the watch app) | Built, installed, and run on the Wear OS emulator (Android Studio's SDK) -- three real bugs found and fixed by actually running it. GATT central/peripheral pairing itself is still unverified (emulator BLE peripheral support is unreliable). See its own README for the full account. |
 
 ## MQTT client-cert auth
 
