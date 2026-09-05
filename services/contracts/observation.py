@@ -22,20 +22,20 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 
 from fastavro import schemaless_reader, schemaless_writer
 from pydantic import BaseModel, Field, field_validator
 
 
-class ObservationSource(str, Enum):
+class ObservationSource(StrEnum):
     icu_monitor = "icu_monitor"
     wearable = "wearable"
     manual = "manual"
     lab = "lab"
 
 
-class QualityFlag(str, Enum):
+class QualityFlag(StrEnum):
     imputed = "imputed"  # carried forward from a previous hour, not a fresh reading (R2)
     out_of_range = "out_of_range"
     device_fault = "device_fault"  # a data_constraints.txt fault fixture (e.g. wearable f07)

@@ -1,0 +1,21 @@
+image:
+  repository: capstone-rpm/ingest-gateway
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 8000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+env: {}
+  # RISK_ENGINE_URL, RAG_SERVICE_URL, etc. -- set per service that proxies to
+  # another one (see each app.py's os.environ.get(...) defaults).

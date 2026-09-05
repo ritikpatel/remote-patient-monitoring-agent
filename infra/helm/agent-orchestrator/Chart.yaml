@@ -1,0 +1,6 @@
+apiVersion: v2
+name: agent-orchestrator
+description: Helm chart for the agent-orchestrator service (PROJECT_PLAN.md section 10)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

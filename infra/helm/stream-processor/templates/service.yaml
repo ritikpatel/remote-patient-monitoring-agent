@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stream-processor.fullname" . }}
+spec:
+  selector:
+    app: {{ include "stream-processor.fullname" . }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}

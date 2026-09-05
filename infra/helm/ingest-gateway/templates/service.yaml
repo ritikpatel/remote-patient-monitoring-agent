@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ingest-gateway.fullname" . }}
+spec:
+  selector:
+    app: {{ include "ingest-gateway.fullname" . }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}

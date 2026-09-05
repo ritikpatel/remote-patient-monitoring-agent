@@ -19,6 +19,15 @@ dependencies = [
     "bleak>=0.22.0",
     "anthropic>=0.40.0",
     "openai>=1.50.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.27.0",
+    "pyjwt>=2.9.0",
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "fhir.resources>=7.1.0",
+    "scikit-learn>=1.5.0",
+    "kafka-python-ng>=2.2.0",
 ]
 
 [dependency-groups]
@@ -38,6 +47,11 @@ extend-exclude = ["notebooks/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008 (function call in a default argument) is a false positive throughout
+# services/: FastAPI's `Depends(...)` in a parameter default is the framework's own
+# required dependency-injection pattern, not the mutable-default-argument bug B008
+# exists to catch.
+ignore = ["B008"]
 
 [tool.black]
 target-version = ["py311"]
@@ -51,3 +65,8 @@ exclude = ["notebooks/", "data/"]
 
 [tool.pytest.ini_options]
 testpaths = ["ml", "warehouse", "simulators", "services", "edge", "notes_synth"]
+# importlib mode: service directories are hyphenated (ingest-gateway, ...), which is
+# not a valid Python package name, and several services each have their own
+# tests/test_app.py -- importlib mode identifies modules by file path rather than
+# dotted name, so neither the hyphen nor the duplicate basenames cause collisions.
+addopts = "--import-mode=importlib"

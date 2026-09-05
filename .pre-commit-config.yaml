@@ -17,7 +17,17 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies: [pydantic, openai, anthropic, duckdb, fastavro, pandas-stubs]
-        exclude: ^(notebooks/|data/)
+        # services/<name>/ directories are hyphenated (ingest-gateway, risk-engine, ...) --
+        # each is its own independently-deployable service, several share a file basename
+        # (every one's entry point is app.py), and a hyphen is not a valid Python package
+        # name. Running mypy across the whole repo in one pass, as this hook does, makes it
+        # try to resolve all of them as siblings under one `services` namespace and fail
+        # immediately ("Duplicate module named 'app'", then "agent-orchestrator is not a
+        # valid Python package name" once __init__.py files were added to disambiguate).
+        # Phase 8's CI type-checks each service on its own (a per-service job/step, scoped
+        # to just that directory plus services/common and services/contracts, which are NOT
+        # excluded here and remain checked on every commit); this exclusion is why.
+        exclude: ^(notebooks/|data/|services/[^/]+-[^/]+/)
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
@@ -25,6 +35,12 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # Helm templates are Go-template text, not standalone YAML -- `{{ .Values.x }}`
+        # breaks a plain YAML parser (e.g. a bare `{{- range ... }}` inside a flow
+        # sequence). They're validated for real by `helm lint`/`helm template`
+        # instead (see infra/helm/README.md), which renders the templates before
+        # parsing.
+        exclude: ^infra/helm/[^/]+/templates/
       - id: check-added-large-files
         args: [--maxkb=5120]
         exclude: ^notebooks/

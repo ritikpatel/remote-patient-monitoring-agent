@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fhir-mapper
+description: Helm chart for the fhir-mapper service (PROJECT_PLAN.md section 10)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
