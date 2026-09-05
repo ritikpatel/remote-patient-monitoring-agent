@@ -52,48 +52,72 @@ WARD_MEDIUM, WARD_HIGH = 5, 7
 ICU_PERCENTILE_MEDIUM, ICU_PERCENTILE_HIGH = 0.75, 0.90
 
 
+# Per-component NEWS2 (RCP 2017, Scale 1) subscores, extracted as standalone
+# functions so other code (simulators/morphing.py, which needs to target a specific
+# HR/SpO2 subscore when it morphs a wearable segment) can reuse the exact same
+# thresholds instead of re-transcribing them. news2_row below is a thin sum over
+# these -- verbatim port of the EDA's news2_row, see notebooks/01_capstone_eda.ipynb
+# cell 38.
+def rr_score(rr: float) -> int:
+    return 3 if rr <= 8 else 1 if rr <= 11 else 0 if rr <= 20 else 2 if rr <= 24 else 3
+
+
+def spo2_score(spo2: float) -> int:
+    return 3 if spo2 <= 91 else 2 if spo2 <= 93 else 1 if spo2 <= 95 else 0
+
+
+def sbp_score(sbp: float) -> int:
+    return 3 if sbp <= 90 else 2 if sbp <= 100 else 1 if sbp <= 110 else 0 if sbp <= 219 else 3
+
+
+def hr_score(hr: float) -> int:
+    return (
+        3
+        if hr <= 40
+        else 1 if hr <= 50 else 0 if hr <= 90 else 1 if hr <= 110 else 2 if hr <= 130 else 3
+    )
+
+
+def temp_score(temp_c: float) -> int:
+    return (
+        3
+        if temp_c <= 35
+        else 1 if temp_c <= 36 else 0 if temp_c <= 38 else 1 if temp_c <= 39 else 2
+    )
+
+
+def gcs_score(gcs_total: float) -> int:
+    return 0 if gcs_total >= 15 else 3  # NEWS2 scores any non-alert state as 3
+
+
+def fio2_score(fio2: float) -> int:
+    return 2 if fio2 > 21 else 0  # supplemental oxygen
+
+
 def news2_row(r: pd.Series) -> pd.Series:
-    """NEWS2 (RCP 2017), Scale 1. Returns (score, n_components_available).
-    Verbatim port of the EDA's news2_row -- see notebooks/01_capstone_eda.ipynb cell 38.
-    """
+    """NEWS2 (RCP 2017), Scale 1. Returns (score, n_components_available)."""
     s, n = 0, 0
     if pd.notna(r.rr):
         n += 1
-        s += 3 if r.rr <= 8 else 1 if r.rr <= 11 else 0 if r.rr <= 20 else 2 if r.rr <= 24 else 3
+        s += rr_score(r.rr)
     if pd.notna(r.spo2):
         n += 1
-        s += 3 if r.spo2 <= 91 else 2 if r.spo2 <= 93 else 1 if r.spo2 <= 95 else 0
+        s += spo2_score(r.spo2)
     if pd.notna(r.sbp):
         n += 1
-        s += (
-            3
-            if r.sbp <= 90
-            else 2 if r.sbp <= 100 else 1 if r.sbp <= 110 else 0 if r.sbp <= 219 else 3
-        )
+        s += sbp_score(r.sbp)
     if pd.notna(r.hr):
         n += 1
-        s += (
-            3
-            if r.hr <= 40
-            else (
-                1
-                if r.hr <= 50
-                else 0 if r.hr <= 90 else 1 if r.hr <= 110 else 2 if r.hr <= 130 else 3
-            )
-        )
+        s += hr_score(r.hr)
     if pd.notna(r.temp_c):
         n += 1
-        s += (
-            3
-            if r.temp_c <= 35
-            else 1 if r.temp_c <= 36 else 0 if r.temp_c <= 38 else 1 if r.temp_c <= 39 else 2
-        )
+        s += temp_score(r.temp_c)
     if pd.notna(r.gcs_total):
         n += 1
-        s += 0 if r.gcs_total >= 15 else 3  # NEWS2 scores any non-alert state as 3
+        s += gcs_score(r.gcs_total)
     if pd.notna(r.fio2):
         n += 1
-        s += 2 if r.fio2 > 21 else 0  # supplemental oxygen
+        s += fio2_score(r.fio2)
     return pd.Series({"news2": s, "components": n})
 
 
