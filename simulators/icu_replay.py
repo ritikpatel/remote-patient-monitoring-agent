@@ -66,12 +66,12 @@ def schedule_stay(
     non-null CORE value in the hourly grid becomes exactly one Observation, timed
     within its hour by the ICU-monitoring arrival model rather than pinned to :00.
     """
-    intime = conn.execute(
+    intime_row = conn.execute(
         "SELECT intime FROM mimiciv_icu.icustays WHERE stay_id = ?", [stay_id]
     ).fetchone()
-    if intime is None:
+    if intime_row is None:
         raise ValueError(f"stay_id {stay_id} not found in mimiciv_icu.icustays")
-    intime = intime[0]
+    intime: datetime = intime_row[0]
 
     cols = ", ".join(CORE + [f"{c}_was_imputed" for c in CORE])
     rows = conn.execute(

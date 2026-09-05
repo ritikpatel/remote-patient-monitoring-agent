@@ -16,7 +16,7 @@ repos:
     rev: v1.11.2
     hooks:
       - id: mypy
-        additional_dependencies: [pydantic]
+        additional_dependencies: [pydantic, openai, anthropic, duckdb, fastavro, pandas-stubs]
         exclude: ^(notebooks/|data/)
 
   - repo: https://github.com/pre-commit/pre-commit-hooks

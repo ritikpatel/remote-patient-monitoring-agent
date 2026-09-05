@@ -1,0 +1,5 @@
+outs:
+- md5: bc1032256690270de46c87ec8390eca4
+  size: 49676
+  hash: md5
+  path: fact_catalog.parquet

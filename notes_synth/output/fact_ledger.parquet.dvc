@@ -1,0 +1,5 @@
+outs:
+- md5: 290cd57ee905249049ed5f4a111bb7df
+  size: 64915
+  hash: md5
+  path: fact_ledger.parquet

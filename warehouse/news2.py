@@ -167,7 +167,7 @@ def main() -> int:
         ever reach *at least* that tier (monotonically non-increasing down the rows --
         every stay has a low hour, so 'low' is always 140/140).
         """
-        hourly = (grid[tier_col].value_counts(normalize=True) * 100).reindex(
+        hourly: pd.Series = (grid[tier_col].value_counts(normalize=True) * 100).reindex(
             ["low", "medium", "high"]
         )
         stay_max_rank = grid.groupby("stay_id")[tier_col].agg(lambda s: s.map(TIER_RANK).max())
