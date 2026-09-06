@@ -11,7 +11,7 @@ services themselves.
 | `ingest-gateway` | 8000 | REST ingress, schema validation (Pydantic), API-key auth, MQTT message handling | Kafka (publisher interface ready — `services/common/publisher.py`'s `KafkaPublisher`); a live EMQX broker |
 | `stream-processor` | 8003 | Rolling stats, trend slopes, HRV (RMSSD), event-rate normalisation (R4) — tested against real wearable IBI data and the fitted arrival models | Nothing — fully self-contained |
 | `fhir-mapper` | 8002 | 11 real FHIR R4B resource mappers, tested against real warehouse rows and notes_synth notes | A live HAPI FHIR server to POST resources to (the mappers already produce exactly what it would receive) |
-| `risk-engine` | 8001 | Deterministic NEWS2 (ward + ICU-recalibrated) and SOFA, served from the warehouse | Phase 5's trained model (`/score/ml` returns 503 until then, honestly) |
+| `risk-engine` | 8001 | Deterministic NEWS2 (ward + ICU-recalibrated) and SOFA; `/score/ml` now serves Phase 5's real trained model + SHAP (`ml/models/serving.py`), a genuine 503 if none is exported | Nothing for the logic — see `ml/README.md`'s serving section for the one known perf limitation |
 | `rag-service` | 8004 | Real TF-IDF retrieval over notes_synth's real generated notes + a small guideline corpus, returning fact-ledger IDs | pgvector + neural embeddings (Postgres) |
 | `alert-service` | 8005 | Raise/dedupe (aligned to the real 4-hourly clock, R6)/suppress/escalate/acknowledge, SQLite-backed | Nothing for the logic; Postgres for multi-instance deployment |
 | `notification-gateway` | 8006 | Real WebSocket broadcast (tested against real socket connections), overnight-escalation routing (E16) | FCM credentials (the real HTTP v1 call is implemented; `NoopPushSender` is what runs today) |
@@ -19,9 +19,16 @@ services themselves.
 | `agent-orchestrator` | 8008 | The full LangGraph graph, all three Phase 4 constraints enforced and tested, real Groq LLM integration | Nothing — fully functional; swap `GROQ_API_KEY` for `ANTHROPIC_API_KEY` to match PROJECT_PLAN.md's claude-sonnet-5 default |
 
 Every service exposes `/health`. Every one has a `Dockerfile`; `risk-engine`,
-`agent-orchestrator`, and `rag-service` have been **built and run for real** in
-this environment (see below) — the rest use the identical pattern and were not
-independently re-verified, for time, not because of any known difference.
+`agent-orchestrator`, and `rag-service` were **built and run for real** in
+this environment during Phase 4 (see below) — the rest use the identical
+pattern and were not independently re-verified, for time, not because of any
+known difference. `risk-engine`'s Dockerfile changed again in Phase 5 (adds
+`ml/` for `/score/ml`) and was *not* re-verified with a live build that
+session — the attempt surfaced a real missing `.dockerignore` (fixed) and
+then hit a genuinely full host disk that broke Docker's own image store;
+see `ml/README.md`'s "Docker verification status" note for the honest
+account. The application logic is still verified for real via `pytest`
+against the actual trained model, just not inside a running container.
 
 ## The agent graph (`agent-orchestrator`)
 

@@ -1,0 +1,42 @@
+# Every service Dockerfile COPYs only the specific files/dirs it needs, but
+# Docker still has to walk and send the WHOLE build context first -- without
+# this file, that includes the multi-GB raw MIMIC/ECG/wearable datasets and
+# the local .venv (found the hard way: a `docker build` here hung for 10+
+# minutes with 0.1s of actual CPU time, entirely spent scanning the context).
+
+.venv/
+.git/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Raw data (never enters git either -- see docs/DATA_USE.md -- but still
+# present on disk locally)
+/mimic-iv-clinical-database-demo-2.2/
+/mimic-iv-ecg-demo-diagnostic-electrocardiogram-matched-subset-demo-0.1/
+/wearable-device-dataset-from-induced-stress-and-structured-exercise-sessions-1.0.1/
+data/raw/
+data/interim/
+data/processed/
+
+eda_figures/
+eda_outputs/
+notebooks/
+
+# MLflow / local model export -- not baked into images; the deployed model
+# comes from the registry (or a real deploy pipeline) at run time, not the
+# Docker build context.
+mlruns/
+mlruns.db
+mlartifacts/
+ml/models/promoted/*.joblib
+ml/models/promoted/*.json
+
+*.csv.gz
+*.parquet
+*.db
+
+.dvc/cache
+.dvc/tmp

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+from ml.models import serving  # noqa: E402
 from services.common.testing import load_service_app  # noqa: E402
 
 _module = load_service_app("risk-engine", REPO_ROOT)
@@ -52,9 +53,29 @@ def test_score_404_for_unknown_stay():
     assert resp.status_code == 404
 
 
-def test_score_ml_returns_503_before_phase_5():
+def test_score_ml_returns_503_when_no_model_exported():
+    if serving.promoted_model_available():
+        pytest.skip("a promoted Phase 5 model is exported in this environment")
     resp = client.post("/score/ml/1/0")
     assert resp.status_code == 503
+
+
+def test_score_ml_returns_a_real_prediction_when_a_model_is_exported(known_stay_hour):
+    if not serving.promoted_model_available():
+        pytest.skip("no promoted Phase 5 model -- run ml/evaluation/run_all.py")
+    stay_id, hour = known_stay_hour
+    resp = client.post(f"/score/ml/{stay_id}/{hour}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert 0.0 <= body["probability"] <= 1.0
+    assert len(body["reasons"]) > 0
+
+
+def test_score_ml_404_for_unknown_stay():
+    if not serving.promoted_model_available():
+        pytest.skip("no promoted Phase 5 model -- run ml/evaluation/run_all.py")
+    resp = client.post("/score/ml/999999999/0")
+    assert resp.status_code == 404
 
 
 def test_high_news2_stay_has_nonempty_reason(known_stay_hour):

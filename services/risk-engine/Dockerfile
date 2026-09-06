@@ -16,6 +16,19 @@ COPY services/contracts/ services/contracts/
 COPY warehouse/news2.py warehouse/build_duckdb.py warehouse/__init__.py warehouse/
 COPY services/risk-engine/app.py services/risk-engine/app.py
 
+# Phase 5: /score/ml serves ml/models/serving.py's promoted-model lookup,
+# which pulls in the same feature engineering the training pipeline used
+# (ml/features/) -- including its reuse of stream-processor's windowing.py.
+# The actual model file under ml/models/promoted/ is excluded by
+# .dockerignore (it's a build/registry artefact -- "not a pickle in a
+# folder", PROJECT_PLAN.md section 11 -- produced by
+# `python ml/evaluation/run_all.py` and pulled from the registry or mounted
+# at deploy time, not baked into the image), so this COPY brings in an
+# empty promoted/ directory. Its absence is handled for real -- /score/ml
+# returns a genuine 503, not a fabricated prediction.
+COPY ml/ ml/
+COPY services/stream-processor/windowing.py services/stream-processor/windowing.py
+
 ENV PYTHONPATH=/app
 EXPOSE 8001
 # --app-dir, not a dotted module path: "risk-engine" is not a valid Python package

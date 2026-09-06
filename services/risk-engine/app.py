@@ -1,12 +1,13 @@
 """risk-engine: deterministic severity scoring, served over HTTP.
 
 PROJECT_PLAN.md section 10: "Serves Phase 5 models; computes recalibrated NEWS2 and
-SOFA deterministically." Phase 5 (predictive models) has not run yet -- the critical
-path is P0->P1->P2->P4->P5->P7, so Phase 4 necessarily arrives before there is a
-trained model to serve. `/score` -- the deterministic path -- is fully real today,
+SOFA deterministically." `/score` -- the deterministic path -- is fully real,
 reading straight from the Phase 1 warehouse (capstone.news2, mimiciv_derived.sofa).
-`/score/ml` is the extension point Phase 5 fills in; it returns 503 until then
-rather than pretending to have an answer.
+`/score/ml` now serves Phase 5's promoted deterioration model (``ml/models/serving.py``,
+loaded from ``ml/models/promoted/`` -- the local stand-in for pulling the registered
+model from the MLflow registry) when one has been trained and exported; it still
+returns a real 503, not a fabricated number, if that export is absent -- e.g. a fresh
+checkout that hasn't run ``python ml/evaluation/run_all.py`` yet.
 
 **The LLM never computes a risk score** (Phase 4's first constraint): this service
 is the only source of truth agent-orchestrator's RiskScorer node is allowed to read.
@@ -22,6 +23,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from ml.models import serving  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "warehouse" / "mimic4_demo.db"
@@ -117,11 +120,23 @@ def _explain(hr, rr, spo2, sbp, temp_c, gcs_total, fio2) -> list[str]:
 
 @app.post("/score/ml/{stay_id}/{hour}")
 def score_ml(stay_id: int, hour: int) -> dict:
-    """Extension point for Phase 5's trained deterioration model. Not available
-    yet -- 503, not a fabricated number."""
-    raise HTTPException(
-        503, "No Phase 5 model registered yet. Use /score for the deterministic NEWS2/SOFA path."
-    )
+    """Phase 5's trained composite-deterioration model, when one has been
+    exported (``python ml/evaluation/run_all.py``). A real 503 -- not a
+    fabricated number -- if it hasn't.
+    """
+    if not serving.promoted_model_available():
+        raise HTTPException(
+            503,
+            "No Phase 5 model exported yet. Run `python ml/evaluation/run_all.py`, "
+            "or use /score for the deterministic NEWS2/SOFA path.",
+        )
+    conn = get_conn()
+    try:
+        return serving.score_one(conn, stay_id, hour)
+    except serving.UnknownStayHour as exc:
+        raise HTTPException(404, str(exc)) from exc
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

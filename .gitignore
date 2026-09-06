@@ -29,9 +29,18 @@ __pycache__/
 # --- MLflow / DVC ---
 mlruns/
 mlartifacts/
+/mlruns.db
 /dvc.lock.tmp
 .dvc/cache
 .dvc/tmp
+
+# Phase 5's promoted model is an MLflow registry artefact, not a pickle
+# committed to git ("the promoted model is a registry artefact, not a pickle
+# in a folder" -- PROJECT_PLAN.md section 11). Regenerate with
+# `python ml/evaluation/run_all.py`. risk-engine's /score/ml degrades to a
+# real 503 when this is absent, rather than fabricating a prediction.
+ml/models/promoted/*
+!ml/models/promoted/.gitkeep
 
 # --- Infra / secrets ---
 .env
