@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,12 +70,20 @@ class AuditRow:
 class AuditLog:
     path: Path | str
     conn: sqlite3.Connection = field(init=False, repr=False)
+    # check_same_thread=False (below) lifts sqlite3's same-thread restriction, but
+    # does NOT make one Connection object safe for concurrent use -- two threads
+    # each doing read-modify-write against the shared implicit transaction state
+    # can and do interleave. Found for real: React's StrictMode double-invoking a
+    # dashboard effect fired two concurrent /run requests at agent-orchestrator,
+    # and record()'s _last_hash()-then-INSERT-then-commit() raced, crashing with
+    # "sqlite3.OperationalError: cannot commit - no transaction is active" --
+    # not a hypothetical, an actual 500 in the browser. This lock serializes every
+    # access to `conn` from this object, which is exactly the scope that needs it
+    # (a single-writer log, same as the note in alert-service/store.py already
+    # accepts -- Phase 8 moves this to Postgres for real multi-instance access).
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        # check_same_thread=False: agent-orchestrator (FastAPI) dispatches sync
-        # route handlers via a worker thread pool -- see the identical fix and note
-        # in services/alert-service/store.py, found by running alert-service's own
-        # tests through TestClient.
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.execute(SCHEMA)
         self.conn.commit()
@@ -93,28 +102,38 @@ class AuditLog:
         subject_ref: str | None = None,
         input_hash: str | None = None,
     ) -> AuditRow:
-        timestamp = datetime.now(UTC).isoformat()
-        prev_hash = self._last_hash()
-        payload_json = json.dumps(payload, sort_keys=True, default=str)
-        row_hash = _sha256(
-            "|".join(
-                [
+        with self._lock:
+            timestamp = datetime.now(UTC).isoformat()
+            prev_hash = self._last_hash()
+            payload_json = json.dumps(payload, sort_keys=True, default=str)
+            row_hash = _sha256(
+                "|".join(
+                    [
+                        timestamp,
+                        actor,
+                        action,
+                        subject_ref or "",
+                        input_hash or "",
+                        payload_json,
+                        prev_hash,
+                    ]
+                )
+            )
+            cur = self.conn.execute(
+                "INSERT INTO audit_log (timestamp, actor, action, subject_ref, input_hash, "
+                "payload, prev_hash, row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
                     timestamp,
                     actor,
                     action,
-                    subject_ref or "",
-                    input_hash or "",
+                    subject_ref,
+                    input_hash,
                     payload_json,
                     prev_hash,
-                ]
+                    row_hash,
+                ),
             )
-        )
-        cur = self.conn.execute(
-            "INSERT INTO audit_log (timestamp, actor, action, subject_ref, input_hash, payload, "
-            "prev_hash, row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (timestamp, actor, action, subject_ref, input_hash, payload_json, prev_hash, row_hash),
-        )
-        self.conn.commit()
+            self.conn.commit()
         assert (
             cur.lastrowid is not None
         )  # None only if no INSERT ran, which the statement above always does
@@ -160,10 +179,11 @@ class AuditLog:
         )
 
     def all_rows(self) -> list[AuditRow]:
-        rows = self.conn.execute(
-            "SELECT seq, timestamp, actor, action, subject_ref, input_hash, payload, "
-            "prev_hash, row_hash FROM audit_log ORDER BY seq"
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT seq, timestamp, actor, action, subject_ref, input_hash, payload, "
+                "prev_hash, row_hash FROM audit_log ORDER BY seq"
+            ).fetchall()
         return [
             AuditRow(seq, ts, actor, action, subj, ih, json.loads(payload), prev, rh)
             for seq, ts, actor, action, subj, ih, payload, prev, rh in rows

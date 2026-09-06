@@ -43,13 +43,18 @@ MANIFEST_PATH = PROMOTED_MODEL_DIR / "feature_manifest.json"
 
 def _format_value(value: Any) -> str:
     """Human-readable rendering for a reason string. A bare numpy scalar's
-    repr ("np.float64(nan)") is not plain language, and a missing vital is
-    itself informative (R2/R3) rather than just the string "nan".
+    repr ("np.float64(nan)") is not plain language, a missing vital is itself
+    informative (R2/R3) rather than just the string "nan", and a raw Python
+    float's repr carries far more decimal places than any vital sign is
+    actually measured to (e.g. "6.458333333333333") -- found overflowing a
+    mobile screen's width in the dashboard's SHAP-reasons panel.
     """
     if pd.isna(value):
         return "not observed"
     if isinstance(value, np.generic):
         value = value.item()
+    if isinstance(value, float):
+        return f"{value:.3g}"
     return repr(value)
 
 

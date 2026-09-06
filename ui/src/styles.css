@@ -1,0 +1,395 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --border: #2a2e37;
+  --text: #e6e8eb;
+  --muted: #8b93a1;
+  --low: #3ba55d;
+  --medium: #d9a441;
+  --high: #d9534f;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body,
+html,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.navbar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.75rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.navbar__brand {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.navbar__links {
+  display: flex;
+  gap: 1rem;
+  flex: 1;
+}
+
+.navbar__links a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+}
+
+.navbar__links a.active {
+  color: var(--text);
+  background: var(--border);
+}
+
+.navbar__status {
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.navbar__status--live {
+  color: var(--low);
+}
+
+.navbar__status--offline {
+  color: var(--medium);
+}
+
+.app__content {
+  padding: 1rem;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  flex: 1;
+}
+
+a {
+  color: #6ea8ff;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--high);
+}
+
+/* --- risk badges / tiers --- */
+
+.risk-badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.risk-badge--low {
+  background: color-mix(in srgb, var(--low) 25%, transparent);
+  color: var(--low);
+}
+
+.risk-badge--medium {
+  background: color-mix(in srgb, var(--medium) 25%, transparent);
+  color: var(--medium);
+}
+
+.risk-badge--high {
+  background: color-mix(in srgb, var(--high) 25%, transparent);
+  color: var(--high);
+}
+
+/* --- ward view table --- */
+
+.patient-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+.patient-table th,
+.patient-table td {
+  text-align: left;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.patient-table__news2 {
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.patient-row--high {
+  background: color-mix(in srgb, var(--high) 8%, transparent);
+}
+
+.patient-row--medium {
+  background: color-mix(in srgb, var(--medium) 6%, transparent);
+}
+
+/* --- panels (patient view) --- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.panel h2 {
+  margin-top: 0;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.citation-list {
+  padding-left: 1.2rem;
+}
+
+.citation-source {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.citation-ids {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* --- NEWS2 trace chart --- */
+
+.news-trace-chart {
+  width: 100%;
+  height: auto;
+}
+
+.trace-line {
+  stroke: #6ea8ff;
+  stroke-width: 2;
+}
+
+.trace-guide {
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.trace-guide--medium {
+  stroke: var(--medium);
+}
+
+.trace-guide--high {
+  stroke: var(--high);
+}
+
+.trace-point--low {
+  fill: var(--low);
+}
+
+.trace-point--medium {
+  fill: var(--medium);
+}
+
+.trace-point--high {
+  fill: var(--high);
+}
+
+.trace-axis-label {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
+/* --- alert inbox --- */
+
+.alert-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.alert-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--low);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  flex-wrap: wrap;
+}
+
+.alert-card--medium {
+  border-left-color: var(--medium);
+}
+
+.alert-card--high {
+  border-left-color: var(--high);
+}
+
+.alert-severity {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.alert-severity--low {
+  color: var(--low);
+}
+
+.alert-severity--medium {
+  color: var(--medium);
+}
+
+.alert-severity--high {
+  color: var(--high);
+}
+
+.alert-card__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  justify-content: center;
+}
+
+.alert-card__actions button {
+  background: var(--border);
+  color: var(--text);
+  border: none;
+  border-radius: 4px;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.alert-card__actions button:hover {
+  background: #3a3f4b;
+}
+
+.alert-card__actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* --- live-push toasts --- */
+
+.toast-stack {
+  position: fixed;
+  top: 4rem;
+  right: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 20;
+  max-width: 320px;
+}
+
+.toast {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--low);
+  border-radius: 6px;
+  padding: 0.6rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.toast--medium {
+  border-left-color: var(--medium);
+}
+
+.toast--high {
+  border-left-color: var(--high);
+}
+
+.toast__dismiss {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.5rem;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.toast {
+  position: relative;
+}
+
+/* --- mobile: the "physician away from the hospital" scenario is the
+   deliverable (PROJECT_PLAN.md section 12), so this is not an afterthought --
+   verified against an actual mobile viewport, see ui/README.md. --- */
+
+@media (max-width: 600px) {
+  .navbar {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .navbar__links {
+    order: 3;
+    width: 100%;
+  }
+
+  .app__content {
+    padding: 0.5rem;
+  }
+
+  .patient-table {
+    font-size: 0.85rem;
+  }
+
+  .patient-table th:nth-child(4),
+  .patient-table td:nth-child(4) {
+    display: none; /* SOFA column -- secondary detail, drop it on a phone */
+  }
+
+  .alert-card {
+    flex-direction: column;
+  }
+
+  .alert-card__actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .toast-stack {
+    left: 0.5rem;
+    right: 0.5rem;
+    max-width: none;
+  }
+}

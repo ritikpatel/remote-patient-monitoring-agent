@@ -94,6 +94,26 @@ def test_health():
     assert client.get("/health").json()["status"] == "ok"
 
 
+def test_dev_token_404_when_dev_mode_disabled(monkeypatch):
+    monkeypatch.setattr(clinician_api_module, "DEV_MODE", False)
+    assert client.post("/dev/token").status_code == 404
+
+
+def test_dev_token_mints_a_usable_token_when_enabled(monkeypatch):
+    monkeypatch.setattr(clinician_api_module, "DEV_MODE", True)
+    resp = client.post("/dev/token")
+    assert resp.status_code == 200
+    token = resp.json()["token"]
+
+    stay_id, hour = _known_stay_hour()
+    resp2 = client.get(
+        f"/risk/{stay_id}/{hour}",
+        params={"patient_ref": f"ICUStay/{stay_id}"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 200
+
+
 def test_get_risk_requires_scope():
     stay_id, hour = _known_stay_hour()
     resp = client.get(

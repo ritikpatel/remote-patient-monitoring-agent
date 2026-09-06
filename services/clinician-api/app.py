@@ -28,21 +28,40 @@ import sys
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from services.common.audit import AuditLog  # noqa: E402
-from services.common.auth import AuthContext, require_scope  # noqa: E402
+from services.common.auth import AuthContext, issue_local_test_token, require_scope  # noqa: E402
 
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8001")
 ALERT_SERVICE_URL = os.environ.get("ALERT_SERVICE_URL", "http://localhost:8005")
 RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8004")
 AGENT_ORCHESTRATOR_URL = os.environ.get("AGENT_ORCHESTRATOR_URL", "http://localhost:8008")
 
+# Opt-in only, and OFF by default: mints a full-scope token for the Phase 6
+# dashboard to bootstrap itself with, standing in for the real Keycloak login
+# Phase 8 replaces this with. Never enable this against anything but a local
+# dev instance.
+DEV_MODE = os.environ.get("CLINICIAN_API_DEV_MODE") == "1"
+DEV_SCOPES = ["patient/*.read", "patient/*.write"]
+
 DEFAULT_AUDIT_DB_PATH = Path(__file__).resolve().parent / "clinician_api_audit.db"
 
 app = FastAPI(title="clinician-api", version="0.1.0")
+
+
+@app.exception_handler(httpx.TimeoutException)
+async def timeout_handler(request: Request, exc: httpx.TimeoutException) -> JSONResponse:
+    """A slow downstream call (risk-engine's /score/ml, agent-orchestrator's
+    /run with a real LLM call) surfaces as a real 504, not a bare 500 stack
+    trace -- the caller can tell "the backend was too slow" from "the backend
+    is broken" without reading server logs.
+    """
+    return JSONResponse(status_code=504, content={"detail": f"downstream service timed out: {exc}"})
+
 
 _clients: dict[str, httpx.AsyncClient] = {}
 _audit_log: AuditLog | None = None
@@ -69,7 +88,13 @@ def configure_clients(
 
 def get_client(name: str, base_url: str) -> httpx.AsyncClient:
     if name not in _clients:
-        _clients[name] = httpx.AsyncClient(base_url=base_url)
+        # httpx's default 5s timeout is too tight for two real downstream calls:
+        # risk-engine's /score/ml rebuilds its whole feature frame per request
+        # (ml/models/serving.py's documented latency limitation) and
+        # agent-orchestrator's /run can make a real LLM call -- both routinely
+        # exceed 5s. Found for real: the dashboard's patient view 500'd with an
+        # unhandled httpx.ReadTimeout the moment it called either one.
+        _clients[name] = httpx.AsyncClient(base_url=base_url, timeout=30.0)
     return _clients[name]
 
 
@@ -88,6 +113,16 @@ def set_audit_log(log: AuditLog) -> None:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "clinician-api"}
+
+
+@app.post("/dev/token")
+def mint_dev_token() -> dict:
+    """Local-dev-only token mint for the Phase 6 dashboard (see DEV_MODE's
+    docstring). 404s, not merely refuses, when disabled -- a caller cannot
+    even tell this route exists in a non-dev deployment."""
+    if not DEV_MODE:
+        raise HTTPException(404, "not found")
+    return {"token": issue_local_test_token("clinician:demo", DEV_SCOPES)}
 
 
 @app.get("/risk/{stay_id}/{hour}")

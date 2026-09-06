@@ -33,6 +33,7 @@ dependencies = [
     "shap>=0.51.0",
     "torch>=2.14.0",
     "wfdb>=4.3.1",
+    "reportlab>=5.0.1",
 ]
 
 [dependency-groups]
@@ -47,7 +48,7 @@ dev = [
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-src = ["warehouse", "simulators", "notes_synth", "ml", "services", "edge", "eval"]
+src = ["warehouse", "simulators", "notes_synth", "ml", "services", "edge", "eval", "reports"]
 extend-exclude = ["notebooks/"]
 
 [tool.ruff.lint]
@@ -69,7 +70,7 @@ warn_unused_ignores = true
 exclude = ["notebooks/", "data/"]
 
 [tool.pytest.ini_options]
-testpaths = ["ml", "warehouse", "simulators", "services", "edge", "notes_synth"]
+testpaths = ["ml", "warehouse", "simulators", "services", "edge", "notes_synth", "reports"]
 # importlib mode: service directories are hyphenated (ingest-gateway, ...), which is
 # not a valid Python package name, and several services each have their own
 # tests/test_app.py -- importlib mode identifies modules by file path rather than
