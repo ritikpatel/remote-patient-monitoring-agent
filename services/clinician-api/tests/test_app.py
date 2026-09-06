@@ -25,6 +25,7 @@ from services.common.testing import load_service_app  # noqa: E402
 # services/common/testing.py's docstring).
 risk_engine_module = load_service_app("risk-engine", REPO_ROOT)
 alert_service_module = load_service_app("alert-service", REPO_ROOT)
+agent_orchestrator_module = load_service_app("agent-orchestrator", REPO_ROOT)
 clinician_api_module = load_service_app("clinician-api", REPO_ROOT)
 app = clinician_api_module.app
 configure_clients = clinician_api_module.configure_clients
@@ -40,6 +41,22 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def wired_dependencies(tmp_path):
     alert_service_module.set_store(alert_service_module.AlertStore(tmp_path / "alerts.db"))
+
+    from starlette.testclient import TestClient as SyncASGIClient
+
+    agent_orchestrator_module.set_deps(
+        agent_orchestrator_module.Dependencies(
+            db_path=risk_engine_module.DEFAULT_DB_PATH,
+            risk_engine_client=SyncASGIClient(
+                risk_engine_module.app, base_url="http://risk-engine"
+            ),
+            rag_client=SyncASGIClient(
+                load_service_app("rag-service", REPO_ROOT).app, base_url="http://rag-service"
+            ),
+            audit_log=AuditLog(tmp_path / "agent_audit.db"),
+            llm=None,
+        )
+    )
     configure_clients(
         risk_engine=httpx.AsyncClient(
             transport=httpx.ASGITransport(app=risk_engine_module.app), base_url="http://risk-engine"
@@ -47,6 +64,10 @@ def wired_dependencies(tmp_path):
         alert_service=httpx.AsyncClient(
             transport=httpx.ASGITransport(app=alert_service_module.app),
             base_url="http://alert-service",
+        ),
+        agent_orchestrator=httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=agent_orchestrator_module.app),
+            base_url="http://agent-orchestrator",
         ),
     )
     audit_log = AuditLog(tmp_path / "audit.db")
@@ -127,3 +148,97 @@ def test_acknowledge_unknown_alert_404():
         headers=_auth_headers(["patient/Communication.write"]),
     )
     assert resp.status_code == 404
+
+
+def test_list_patients_proxies_real_risk_engine_ward_view():
+    resp = client.get("/patients", headers=_auth_headers(["patient/RiskAssessment.read"]))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) > 0
+    assert "news2" in body[0] and "patient_ref" in body[0]
+
+
+def test_get_trace_proxies_real_news2_series():
+    stay_id, _ = _known_stay_hour()
+    resp = client.get(
+        f"/patients/{stay_id}/trace", headers=_auth_headers(["patient/Observation.read"])
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()) > 0
+
+
+def test_get_trace_404_for_unknown_stay():
+    resp = client.get(
+        "/patients/999999999/trace", headers=_auth_headers(["patient/Observation.read"])
+    )
+    assert resp.status_code == 404
+
+
+def test_get_risk_ml_reflects_risk_engines_real_availability():
+    from ml.models import serving
+
+    stay_id, hour = _known_stay_hour()
+    resp = client.post(
+        f"/risk/{stay_id}/{hour}/ml",
+        params={"patient_ref": f"ICUStay/{stay_id}"},
+        headers=_auth_headers(["patient/RiskAssessment.read"]),
+    )
+    if serving.promoted_model_available():
+        assert resp.status_code == 200
+        assert 0.0 <= resp.json()["probability"] <= 1.0
+    else:
+        assert resp.status_code == 503
+
+
+def test_get_agent_assessment_runs_the_real_graph():
+    stay_id, hour = _known_stay_hour()
+    resp = client.post(
+        f"/patients/{stay_id}/{hour}/assessment",
+        params={"patient_ref": f"ICUStay/{stay_id}"},
+        headers=_auth_headers(["patient/RiskAssessment.read"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "escalate" in body
+    assert "context_passages" in body
+    assert len(body["audit_rows"]) == 6
+
+
+def test_get_active_alerts_spans_every_patient(wired_dependencies):
+    alert_client = TestClient(alert_service_module.app)
+    alert_client.post(
+        "/alerts",
+        json={"patient_ref": "ICUStay/5", "alert_type": "t", "severity": "high", "message": "m"},
+    )
+    resp = client.get("/alerts/active", headers=_auth_headers(["patient/Communication.read"]))
+    assert resp.status_code == 200
+    assert any(a["patient_ref"] == "ICUStay/5" for a in resp.json())
+
+
+def test_escalate_and_suppress_alert_proxy_and_audit(wired_dependencies):
+    alert_client = TestClient(alert_service_module.app)
+    raise_resp = alert_client.post(
+        "/alerts",
+        json={"patient_ref": "ICUStay/6", "alert_type": "t", "severity": "low", "message": "m"},
+    )
+    alert_id = raise_resp.json()["alert"]["id"]
+
+    resp = client.post(
+        f"/alerts/{alert_id}/escalate",
+        params={"patient_ref": "ICUStay/6"},
+        headers=_auth_headers(["patient/Communication.write"]),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "escalated"
+
+    resp2 = client.post(
+        f"/alerts/{alert_id}/suppress",
+        params={"patient_ref": "ICUStay/6"},
+        headers=_auth_headers(["patient/Communication.write"]),
+    )
+    assert resp2.status_code == 200
+    assert resp2.json()["status"] == "suppressed"
+
+    rows = wired_dependencies.all_rows()
+    assert any(r.action == "alert_escalate" for r in rows)
+    assert any(r.action == "alert_suppress" for r in rows)

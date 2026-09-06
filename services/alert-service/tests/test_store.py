@@ -104,6 +104,21 @@ def test_active_for_patient_excludes_acknowledged_and_suppressed(tmp_path):
     store.close()
 
 
+def test_all_active_spans_every_patient_ordered_by_severity(tmp_path):
+    store = AlertStore(tmp_path / "alerts.db")
+    low, _ = store.raise_alert("ICUStay/1", "type_a", "low", "m", datetime(2110, 1, 1, 0, 0))
+    high, _ = store.raise_alert("ICUStay/2", "type_b", "high", "m", datetime(2110, 1, 1, 0, 0))
+    medium, _ = store.raise_alert("ICUStay/3", "type_c", "medium", "m", datetime(2110, 1, 1, 0, 0))
+    suppressed, _ = store.raise_alert(
+        "ICUStay/4", "type_d", "high", "m", datetime(2110, 1, 1, 0, 0)
+    )
+    store.suppress(suppressed.id)
+
+    active = store.all_active()
+    assert [a.id for a in active] == [high.id, medium.id, low.id]
+    store.close()
+
+
 def test_get_unknown_alert_raises(tmp_path):
     store = AlertStore(tmp_path / "alerts.db")
     try:

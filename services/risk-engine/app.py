@@ -118,6 +118,97 @@ def _explain(hr, rr, spo2, sbp, temp_c, gcs_total, fio2) -> list[str]:
     return reasons
 
 
+class PatientSummary(BaseModel):
+    stay_id: int
+    patient_ref: str
+    hour: int  # latest hour with a recorded score -- "now" in this replay-based demo
+    news2: int
+    news2_tier_icu: str
+    sofa_24h: int | None
+
+
+@app.get("/patients", response_model=list[PatientSummary])
+def list_patients() -> list[PatientSummary]:
+    """Ward view (PROJECT_PLAN.md section 12): every monitored stay ranked by
+    its *current* risk. Placeholder ward registry -- Phase 8's real system
+    would list patients from HAPI FHIR's Patient/Encounter resources; this
+    demo's data source is the warehouse's own hourly grid, which is also
+    exactly the data risk-engine already owns and reads elsewhere.
+
+    "Current" for a stay is its latest hourly_grid row -- E1: care in this
+    dataset is charted hourly, not streamed, so "latest available hour" is
+    the honest analogue of "now" rather than an invented live timestamp.
+    """
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT n.stay_id, n.hour, n.news2, n.tier_icu, s.sofa_24hours
+            FROM capstone.news2 n
+            JOIN (SELECT stay_id, MAX(hour) AS hour FROM capstone.news2 GROUP BY stay_id) latest
+              ON n.stay_id = latest.stay_id AND n.hour = latest.hour
+            LEFT JOIN mimiciv_derived.sofa s ON s.stay_id = n.stay_id AND s.hr = n.hour
+            ORDER BY n.news2 DESC
+            """
+        ).fetchall()
+        return [
+            PatientSummary(
+                stay_id=stay_id,
+                patient_ref=f"ICUStay/{stay_id}",
+                hour=hour,
+                news2=news2,
+                news2_tier_icu=tier_icu,
+                sofa_24h=sofa_24h,
+            )
+            for stay_id, hour, news2, tier_icu, sofa_24h in rows
+        ]
+    finally:
+        conn.close()
+
+
+class TracePoint(BaseModel):
+    hour: int
+    news2: int
+    news2_tier_icu: str
+    hr: float | None
+    rr: float | None
+    spo2: float | None
+    sbp: float | None
+    temp_c: float | None
+
+
+@app.get("/trace/{stay_id}", response_model=list[TracePoint])
+def trace(stay_id: int) -> list[TracePoint]:
+    """The full NEWS2 trace for one stay (PROJECT_PLAN.md section 12: "live
+    vitals with the NEWS2 trace") -- every hour, not just the latest, so the
+    dashboard's patient view can chart it.
+    """
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT hour, news2, tier_icu, hr, rr, spo2, sbp, temp_c "
+            "FROM capstone.news2 WHERE stay_id = ? ORDER BY hour",
+            [stay_id],
+        ).fetchall()
+        if not rows:
+            raise HTTPException(404, f"no news2 trace for stay_id={stay_id}")
+        return [
+            TracePoint(
+                hour=hour,
+                news2=news2,
+                news2_tier_icu=tier_icu,
+                hr=hr,
+                rr=rr,
+                spo2=spo2,
+                sbp=sbp,
+                temp_c=temp_c,
+            )
+            for hour, news2, tier_icu, hr, rr, spo2, sbp, temp_c in rows
+        ]
+    finally:
+        conn.close()
+
+
 @app.post("/score/ml/{stay_id}/{hour}")
 def score_ml(stay_id: int, hour: int) -> dict:
     """Phase 5's trained composite-deterioration model, when one has been

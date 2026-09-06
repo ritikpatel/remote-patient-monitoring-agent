@@ -38,6 +38,7 @@ from services.common.auth import AuthContext, require_scope  # noqa: E402
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8001")
 ALERT_SERVICE_URL = os.environ.get("ALERT_SERVICE_URL", "http://localhost:8005")
 RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8004")
+AGENT_ORCHESTRATOR_URL = os.environ.get("AGENT_ORCHESTRATOR_URL", "http://localhost:8008")
 
 DEFAULT_AUDIT_DB_PATH = Path(__file__).resolve().parent / "clinician_api_audit.db"
 
@@ -51,6 +52,7 @@ def configure_clients(
     risk_engine: httpx.AsyncClient | None = None,
     alert_service: httpx.AsyncClient | None = None,
     rag_service: httpx.AsyncClient | None = None,
+    agent_orchestrator: httpx.AsyncClient | None = None,
 ) -> None:
     """Tests call this with httpx.AsyncClient(transport=httpx.ASGITransport(app=...))
     pointed at the real service app objects; production leaves it uncalled and
@@ -61,6 +63,8 @@ def configure_clients(
         _clients["alert-service"] = alert_service
     if rag_service is not None:
         _clients["rag-service"] = rag_service
+    if agent_orchestrator is not None:
+        _clients["agent-orchestrator"] = agent_orchestrator
 
 
 def get_client(name: str, base_url: str) -> httpx.AsyncClient:
@@ -114,6 +118,118 @@ async def get_risk(
     return resp.json()
 
 
+@app.get("/patients")
+async def list_patients(
+    ctx: AuthContext = Depends(require_scope("RiskAssessment", "read")),
+) -> list[dict]:
+    """Ward view (PROJECT_PLAN.md section 12): every monitored patient ranked
+    by current risk. Proxies risk-engine's /patients rather than reading the
+    warehouse directly -- clinician-api stays a pure BFF.
+    """
+    client = get_client("risk-engine", RISK_ENGINE_URL)
+    resp = await client.get("/patients")
+    resp.raise_for_status()
+    get_audit_log().record(
+        actor=f"clinician:{ctx.subject}",
+        action="phi_read",
+        subject_ref=None,
+        payload={"resource": "RiskAssessment", "op": "list_patients"},
+    )
+    return resp.json()
+
+
+@app.get("/patients/{stay_id}/trace")
+async def get_trace(
+    stay_id: int, ctx: AuthContext = Depends(require_scope("Observation", "read"))
+) -> list[dict]:
+    """The NEWS2 trace for one patient's whole stay -- the chart on the
+    dashboard's patient view."""
+    client = get_client("risk-engine", RISK_ENGINE_URL)
+    resp = await client.get(f"/trace/{stay_id}")
+    if resp.status_code == 404:
+        raise HTTPException(404, resp.json().get("detail", "not found"))
+    resp.raise_for_status()
+    get_audit_log().record(
+        actor=f"clinician:{ctx.subject}",
+        action="phi_read",
+        subject_ref=f"ICUStay/{stay_id}",
+        payload={"resource": "Observation", "op": "news2_trace"},
+    )
+    return resp.json()
+
+
+@app.post("/risk/{stay_id}/{hour}/ml")
+async def get_risk_ml(
+    stay_id: int,
+    hour: int,
+    patient_ref: str,
+    ctx: AuthContext = Depends(require_scope("RiskAssessment", "read")),
+) -> dict:
+    """Phase 5's learned model + SHAP attribution -- "contributing SHAP
+    factors" on the patient view. A real 502 (not a fabricated score) if
+    risk-engine itself has no model exported (it returns 503 in that case).
+    """
+    client = get_client("risk-engine", RISK_ENGINE_URL)
+    resp = await client.post(f"/score/ml/{stay_id}/{hour}")
+    if resp.status_code == 503:
+        raise HTTPException(503, resp.json().get("detail", "no Phase 5 model exported"))
+    if resp.status_code == 404:
+        raise HTTPException(404, resp.json().get("detail", "not found"))
+    resp.raise_for_status()
+    get_audit_log().record(
+        actor=f"clinician:{ctx.subject}",
+        action="phi_read",
+        subject_ref=patient_ref,
+        payload={"resource": "RiskAssessment", "op": "ml_score", "stay_id": stay_id, "hour": hour},
+    )
+    return resp.json()
+
+
+@app.post("/patients/{stay_id}/{hour}/assessment")
+async def get_agent_assessment(
+    stay_id: int,
+    hour: int,
+    patient_ref: str,
+    ctx: AuthContext = Depends(require_scope("RiskAssessment", "read")),
+) -> dict:
+    """Runs the Phase 4 agent graph and returns its full state: risk score,
+    retrieved note passages with fact-ledger citations, the escalation
+    rationale, and the LLM summary -- the patient view's "agent's escalation
+    rationale" and "retrieved note passages with ledger citations" panels in
+    one call, since agent-orchestrator's /run already bundles exactly that.
+    """
+    client = get_client("agent-orchestrator", AGENT_ORCHESTRATOR_URL)
+    resp = await client.post(
+        "/run", json={"stay_id": stay_id, "hour": hour, "patient_ref": patient_ref}
+    )
+    resp.raise_for_status()
+    get_audit_log().record(
+        actor=f"clinician:{ctx.subject}",
+        action="phi_read",
+        subject_ref=patient_ref,
+        payload={"resource": "RiskAssessment", "op": "agent_assessment", "stay_id": stay_id},
+    )
+    return resp.json()
+
+
+@app.get("/alerts/active")
+async def get_active_alerts(
+    ctx: AuthContext = Depends(require_scope("Communication", "read")),
+) -> list[dict]:
+    """Ward-wide alert inbox (PROJECT_PLAN.md section 12), across every
+    patient -- distinct from GET /alerts, which is scoped to one."""
+    client = get_client("alert-service", ALERT_SERVICE_URL)
+    resp = await client.get("/alerts/active")
+    resp.raise_for_status()
+    get_audit_log().record(
+        actor=f"clinician:{ctx.subject}",
+        action="phi_read",
+        subject_ref=None,
+        payload={"resource": "Communication", "op": "list_active_alerts"},
+    )
+    return resp.json()
+
+
 @app.get("/alerts")
 async def get_alerts(
     patient_ref: str, ctx: AuthContext = Depends(require_scope("Communication", "read"))
@@ -146,6 +262,46 @@ async def acknowledge_alert(
     get_audit_log().record(
         actor=f"clinician:{ctx.subject}",
         action="alert_ack",
+        subject_ref=patient_ref,
+        payload={"alert_id": alert_id},
+    )
+    return resp.json()
+
+
+@app.post("/alerts/{alert_id}/escalate")
+async def escalate_alert(
+    alert_id: int,
+    patient_ref: str,
+    ctx: AuthContext = Depends(require_scope("Communication", "write")),
+) -> dict:
+    client = get_client("alert-service", ALERT_SERVICE_URL)
+    resp = await client.post(f"/alerts/{alert_id}/escalate")
+    if resp.status_code == 404:
+        raise HTTPException(404, "alert not found")
+    resp.raise_for_status()
+    get_audit_log().record(
+        actor=f"clinician:{ctx.subject}",
+        action="alert_escalate",
+        subject_ref=patient_ref,
+        payload={"alert_id": alert_id},
+    )
+    return resp.json()
+
+
+@app.post("/alerts/{alert_id}/suppress")
+async def suppress_alert(
+    alert_id: int,
+    patient_ref: str,
+    ctx: AuthContext = Depends(require_scope("Communication", "write")),
+) -> dict:
+    client = get_client("alert-service", ALERT_SERVICE_URL)
+    resp = await client.post(f"/alerts/{alert_id}/suppress")
+    if resp.status_code == 404:
+        raise HTTPException(404, "alert not found")
+    resp.raise_for_status()
+    get_audit_log().record(
+        actor=f"clinician:{ctx.subject}",
+        action="alert_suppress",
         subject_ref=patient_ref,
         payload={"alert_id": alert_id},
     )

@@ -167,5 +167,21 @@ class AlertStore:
         ).fetchall()
         return [_row_to_alert(r) for r in rows]
 
+    def all_active(self) -> list[Alert]:
+        """Ward-wide alert inbox (PROJECT_PLAN.md section 12): every active or
+        escalated alert across every patient, highest severity and most
+        recent first -- `active_for_patient` is scoped to one patient and
+        cannot serve the dashboard's inbox view.
+        """
+        rows = self.conn.execute(
+            "SELECT id, patient_ref, alert_type, severity, message, dedup_key, "
+            "raised_at, last_seen_at, repeat_count, status, acknowledged_by, acknowledged_at "
+            "FROM alerts "
+            "WHERE status IN ('active', 'escalated') "
+            "ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+            "raised_at DESC"
+        ).fetchall()
+        return [_row_to_alert(r) for r in rows]
+
     def close(self) -> None:
         self.conn.close()

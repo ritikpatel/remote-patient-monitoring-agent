@@ -78,6 +78,48 @@ def test_score_ml_404_for_unknown_stay():
     assert resp.status_code == 404
 
 
+def test_list_patients_ranks_by_current_news2_descending():
+    resp = client.get("/patients")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) > 0
+    scores = [p["news2"] for p in body]
+    assert scores == sorted(scores, reverse=True)
+    first = body[0]
+    assert first["patient_ref"] == f"ICUStay/{first['stay_id']}"
+
+
+def test_list_patients_hour_is_each_stays_own_latest():
+    conn = duckdb.connect(str(DEFAULT_DB_PATH), read_only=True)
+    expected = dict(
+        conn.execute("SELECT stay_id, MAX(hour) FROM capstone.news2 GROUP BY stay_id").fetchall()
+    )
+    conn.close()
+    body = client.get("/patients").json()
+    for row in body:
+        assert row["hour"] == expected[row["stay_id"]]
+
+
+def test_trace_returns_the_full_hourly_series(known_stay_hour):
+    stay_id, _ = known_stay_hour
+    conn = duckdb.connect(str(DEFAULT_DB_PATH), read_only=True)
+    (expected_n,) = conn.execute(
+        "SELECT COUNT(*) FROM capstone.news2 WHERE stay_id = ?", [stay_id]
+    ).fetchone()
+    conn.close()
+
+    resp = client.get(f"/trace/{stay_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == expected_n
+    assert body == sorted(body, key=lambda p: p["hour"])
+
+
+def test_trace_404_for_unknown_stay():
+    resp = client.get("/trace/999999999")
+    assert resp.status_code == 404
+
+
 def test_high_news2_stay_has_nonempty_reason(known_stay_hour):
     conn = duckdb.connect(str(DEFAULT_DB_PATH), read_only=True)
     row = conn.execute(
