@@ -29,6 +29,7 @@ from typing import Any
 
 import duckdb
 import joblib
+import numpy as np
 import pandas as pd
 import shap
 
@@ -38,6 +39,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROMOTED_MODEL_DIR = REPO_ROOT / "ml" / "models" / "promoted"
 MODEL_PATH = PROMOTED_MODEL_DIR / "deterioration_model.joblib"
 MANIFEST_PATH = PROMOTED_MODEL_DIR / "feature_manifest.json"
+
+
+def _format_value(value: Any) -> str:
+    """Human-readable rendering for a reason string. A bare numpy scalar's
+    repr ("np.float64(nan)") is not plain language, and a missing vital is
+    itself informative (R2/R3) rather than just the string "nan".
+    """
+    if pd.isna(value):
+        return "not observed"
+    if isinstance(value, np.generic):
+        value = value.item()
+    return repr(value)
 
 
 class PromotedModelUnavailable(Exception):
@@ -131,7 +144,7 @@ def score_one(conn: duckdb.DuckDBPyConnection, stay_id: int, hour: int) -> dict:
     contributions = pd.Series(shap_values[0], index=feature_columns)
     top = contributions.reindex(contributions.abs().sort_values(ascending=False).index).head(5)
     reasons = [
-        f"{name}={x.iloc[0][str(name)]!r} contributes {value:+.3f} to predicted risk"
+        f"{name}={_format_value(x.iloc[0][str(name)])} contributes {value:+.3f} to predicted risk"
         for name, value in top.items()
     ]
 

@@ -5,6 +5,13 @@
 # and the warehouse module it reads from directly.
 FROM python:3.11-slim AS base
 
+# LightGBM's compiled core links against GNU OpenMP at runtime, which
+# python:3.11-slim does not ship (found for real: /score/ml 500'd with
+# "OSError: libgomp.so.1: cannot open shared object file" the moment the
+# promoted model's joblib.load() tried to import lightgbm).
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir uv
 
 WORKDIR /app

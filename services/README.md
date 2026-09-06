@@ -23,12 +23,11 @@ Every service exposes `/health`. Every one has a `Dockerfile`; `risk-engine`,
 this environment during Phase 4 (see below) — the rest use the identical
 pattern and were not independently re-verified, for time, not because of any
 known difference. `risk-engine`'s Dockerfile changed again in Phase 5 (adds
-`ml/` for `/score/ml`) and was *not* re-verified with a live build that
-session — the attempt surfaced a real missing `.dockerignore` (fixed) and
-then hit a genuinely full host disk that broke Docker's own image store;
-see `ml/README.md`'s "Docker verification status" note for the honest
-account. The application logic is still verified for real via `pytest`
-against the actual trained model, just not inside a running container.
+`ml/` for `/score/ml`) and was re-verified with a real container build and
+run — that pass found and fixed two real container-only bugs (a missing
+`libgomp1` system package LightGBM needs, and `torch` pulling in an entire
+unused CUDA toolkit on Linux); see `ml/README.md`'s Docker verification
+section for the full account.
 
 ## The agent graph (`agent-orchestrator`)
 

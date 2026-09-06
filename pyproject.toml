@@ -75,3 +75,22 @@ testpaths = ["ml", "warehouse", "simulators", "services", "edge", "notes_synth"]
 # tests/test_app.py -- importlib mode identifies modules by file path rather than
 # dotted name, so neither the hyphen nor the duplicate basenames cause collisions.
 addopts = "--import-mode=importlib"
+
+[tool.uv.sources]
+# PyPI's default Linux torch wheel is CUDA-enabled and drags in the entire
+# nvidia-* toolkit (cublas, cudnn, cusolver, nccl, triton, ... ~2.5GB) as
+# dependencies -- found for real: a service Dockerfile's `uv sync` sat
+# downloading that toolkit into a CPU-only container that will never touch a
+# GPU. Every service Dockerfile is Linux/amd64-or-arm64 python:3.11-slim, so
+# route torch there to PyTorch's own CPU-only index instead. macOS keeps
+# resolving from PyPI as before -- its wheel has no CUDA dependency to begin
+# with (there's no CUDA on Apple Silicon), and PyTorch's CPU index does not
+# publish macOS wheels.
+torch = [
+    { index = "pytorch-cpu", marker = "platform_system == 'Linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

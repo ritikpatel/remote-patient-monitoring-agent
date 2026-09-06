@@ -168,24 +168,42 @@ Two things are deliberately imperfect and said so in the code, not hidden:
    the *deterministic* NEWS2/SOFA path (`/score`), not this extension point --
    stated as a known limitation, not silently absorbed into that budget.
 
-**Docker verification status, honestly:** the updated `services/risk-engine/
-Dockerfile` (now `COPY`ing `ml/` and `stream-processor/windowing.py`) was
-*not* re-verified with a live container build this session. Building it
-surfaced two real, separate problems worth recording even though the second
-one blocked the attempt: (1) this repo had no `.dockerignore`, so a plain
-`docker build` was sending the multi-gigabyte raw-dataset and `.venv`
-directories as build context -- fixed, real fix, unrelated to whether the
-build itself completes; (2) the host disk was found to be essentially full
-during this attempt (56Mi free of 228Gi), which corrupted Docker Desktop's
-local image/layer store mid-build (`input/output error` extracting a layer,
-then the same error from `docker system prune`). That is a host-machine
-condition, not a defect in this Dockerfile or in `ml/`'s code, and resolving
-it (freeing disk space, likely including Docker Desktop's own 18GB VM disk
-image) needs the user's decision, not an automated fix from inside this
-session. The application logic this Dockerfile would serve is still verified
-for real, just via `pytest` (`ml/tests/test_serving.py`,
-`services/risk-engine/tests/test_app.py`) against the actual trained model,
-rather than via a running container.
+**Docker verification: done for real, on a second pass.** The first attempt
+(same session, before the host disk was cleared) surfaced a real missing
+`.dockerignore` (a plain `docker build` was sending the multi-gigabyte
+raw-dataset and `.venv` directories as build context) and then hit a host
+disk that was genuinely full, which corrupted Docker Desktop's own image
+store mid-build. Once the disk had room, a clean rebuild surfaced two more
+real, previously-invisible bugs -- both fixed and re-verified in a running
+container, not just patched and assumed:
+
+- **`libgomp.so.1: cannot open shared object file`.** LightGBM's compiled
+  core dynamically links GNU OpenMP; `python:3.11-slim` doesn't ship it.
+  `/score/ml` 500'd the instant `joblib.load()` tried to import `lightgbm`
+  inside the container. Every local test had passed because macOS already
+  has an OpenMP runtime on the library search path. Fixed with
+  `apt-get install libgomp1` in `services/risk-engine/Dockerfile`.
+- **`torch` pulling the entire CUDA toolkit into a CPU-only container.**
+  PyPI's default Linux `torch` wheel is CUDA-enabled, so `uv sync` inside the
+  Linux container resolved ~2.5GB of `nvidia-*` packages (cublas, cudnn,
+  cusolver, nccl, triton, ...) that nothing in this project uses -- the image
+  never runs on a GPU, and GRU training only ever happens on the host during
+  `run_all.py`. Fixed with a `[tool.uv.sources]` entry in `pyproject.toml`
+  routing `torch` to PyTorch's own CPU-only index for `platform_system ==
+  'Linux'` only (macOS keeps resolving from PyPI, whose wheel has no CUDA
+  dependency to begin with). Dropped the image's content size from 3.55GB to
+  552MB and regenerated `uv.lock` accordingly -- `uv sync` on macOS was
+  re-verified to still resolve the identical local dependency set.
+
+With both fixed, a real container (`docker build` + `docker run`, the real
+warehouse and the real exported model volume-mounted in, no live sockets or
+mocks) answered `/health`, `/score`, and `/score/ml` correctly for two
+different patients, and `/score/ml` 404s correctly for an unknown stay. A
+third, cosmetic bug turned up in that same pass -- `/score/ml`'s "reasons"
+field was rendering missing vitals and numpy scalars as `np.float64(nan)`
+instead of plain language -- fixed in `ml/models/serving.py::_format_value`
+with a regression test, verified by rebuilding and re-curling the container
+a second time.
 
 ## Real bugs found while building this (not by inspection)
 

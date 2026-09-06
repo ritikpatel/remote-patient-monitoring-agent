@@ -17,6 +17,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WAREHOUSE_DB = REPO_ROOT / "warehouse" / "mimic4_demo.db"
 
 
+def test_format_value_renders_missing_as_plain_language_not_nan_repr() -> None:
+    assert serving._format_value(float("nan")) == "not observed"
+    assert serving._format_value(np.float64("nan")) == "not observed"
+    assert serving._format_value(pd.NA) == "not observed"
+
+
+def test_format_value_unwraps_numpy_scalars_to_plain_python_repr() -> None:
+    # Found for real: a bare numpy scalar's repr leaked into /score/ml's
+    # "reasons" field as e.g. "np.float64(93.0)" instead of "93.0".
+    assert serving._format_value(np.float64(93.0)) == "93.0"
+    assert serving._format_value(np.float32(1)) == "1.0"
+    assert serving._format_value(np.int64(5)) == "5"
+    assert serving._format_value("MICU") == "'MICU'"
+
+
 def test_promoted_model_unavailable_raises_a_specific_exception(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(serving, "MODEL_PATH", tmp_path / "does_not_exist.joblib")
     monkeypatch.setattr(serving, "MANIFEST_PATH", tmp_path / "does_not_exist.json")
