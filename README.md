@@ -72,7 +72,7 @@ services/                       9 FastAPI microservices + shared common/contract
 edge/{wear_os,edge_agent}/      real Wear OS app + BLE-to-MQTT bridge
 ui/                              clinician dashboard (React)
 reports/                         automated PDF clinical reports
-infra/{compose,k8s,helm,ci}/    local docker-compose, kind/K8s manifests, Helm charts
+infra/{compose,k8s,helm,observability,ci}/  docker-compose, kind/K8s manifests, Helm charts, Prometheus/Grafana
 eval/                            validation framework + k6 load tests
 docs/                            compliance mapping, data-use terms
 ```

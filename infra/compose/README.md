@@ -126,7 +126,7 @@ Keycloak is reachable at `localhost:8180`).
 - **Prometheus / Grafana**: every one of the 9 services exposes a real
   `/metrics` (`services/common/observability.py`, verified directly with
   `curl http://localhost:8001/metrics` against a running `risk-engine`); the
-  provisioned Grafana dashboard (`grafana/provisioning/dashboards/json/`)
+  provisioned Grafana dashboard (`../observability/grafana/provisioning/dashboards/json/`)
   was written but not opened in a browser against a live Grafana in this pass.
 - **Jaeger**: `services/common/observability.instrument_tracing` only
   activates when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (every compose service
