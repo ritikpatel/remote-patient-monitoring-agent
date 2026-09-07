@@ -86,6 +86,10 @@ def run_daily_summary(stay_id: int, day: int, conn: duckdb.DuckDBPyConnection) -
             f"Ventilation started: {result.ventilation_started_today}.",
         ),
         ReportSection("Outstanding risk", f"Tier as of end of day: {result.outstanding_tier}"),
+        ReportSection(
+            "Abnormal labs",
+            f"{result.abnormal_lab_count} abnormal lab result(s), cumulative this admission.",
+        ),
     ]
     out_path = OUTPUT_DIR / f"daily_summary_{stay_id}_day{day}.pdf"
     render_pdf(

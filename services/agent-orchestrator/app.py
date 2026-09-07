@@ -32,7 +32,7 @@ RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8001")
 RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8004")
 
 app = FastAPI(title="agent-orchestrator", version="0.1.0")
-instrument_metrics(app, "agent-orchestrator")
+instrument_metrics(app)
 instrument_tracing(app, "agent-orchestrator")
 _deps: Dependencies | None = None
 

@@ -331,8 +331,13 @@ def render_rag_agent_section(
       <tr><td>Escalation agreement with the rule-based policy</td>
           <td>{agreement_result.n_agree} / {agreement_result.n}
               ({_fmt(agreement_result.agreement_rate * 100, 1)}%)</td></tr>
+      <tr><td>Mean tokens per run</td>
+          <td>{_fmt(cost_result.mean_tokens_per_run, 0)}</td></tr>
       <tr><td>LLM cost per run (mean, upper bound)</td>
           <td>${_fmt(cost_result.mean_cost_per_run_usd, 5)}</td></tr>
+      <tr><td>Total LLM cost, this corpus (upper bound)</td>
+          <td>${_fmt(cost_result.total_cost_usd_upper_bound, 4)}
+              ({cost_result.n_runs} runs)</td></tr>
       <tr><td>Projected LLM cost per patient-day</td>
           <td>${_fmt(cost_result.projected_cost_per_patient_day_usd, 4)}</td></tr>
     </tbody></table>

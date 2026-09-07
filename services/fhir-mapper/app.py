@@ -48,7 +48,7 @@ DEFAULT_DB_PATH = REPO_ROOT / "warehouse" / "mimic4_demo.db"
 HAPI_FHIR_BASE_URL = os.environ.get("HAPI_FHIR_BASE_URL")
 
 app = FastAPI(title="fhir-mapper", version="0.1.0")
-instrument_metrics(app, "fhir-mapper")
+instrument_metrics(app)
 instrument_tracing(app, "fhir-mapper")
 
 

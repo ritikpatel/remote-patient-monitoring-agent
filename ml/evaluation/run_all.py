@@ -402,22 +402,26 @@ def main() -> int:
             best_summary = next(
                 s for s in all_summaries if s["model"] == best_variant and s["horizon"] == horizon
             )
-            promoted_candidate = (
-                best_variant,
-                horizon,
-                results_this_horizon[best_variant][4],
-                best_summary["auprc_point"],
-            )
+            # Only best_variant and its AUPRC are actually needed below -- the
+            # horizon is always PRIMARY_HORIZON by construction (this branch
+            # only runs `if horizon == PRIMARY_HORIZON`), and the fold's own
+            # feature matrix is never reused: the promoted model gets a fresh
+            # final refit (x_final, below) instead. Found while auditing for
+            # dead code -- this tuple used to carry both, unused.
+            promoted_candidate = (best_variant, best_summary["auprc_point"])
 
     # ----------------------------------------------------------------
     # SHAP attribution + model promotion (primary horizon's best model)
     # ----------------------------------------------------------------
     assert promoted_candidate is not None
-    best_name, best_horizon, x_full, best_auprc = promoted_candidate
+    best_name, best_auprc = promoted_candidate
     lab_primary = labels.build_labels(conn, grid, horizons=(PRIMARY_HORIZON,))
     ecg_attached = attach_ecg(features, ecg_features, conn)
     include_ecg = ecg_attached if "ecg" in best_name else None
-    x_final, y_final, groups_final = engineer.feature_matrix_for_training(
+    # No CV here -- this is the one final refit on everything, so the group
+    # labels feature_matrix_for_training returns (for grouped splitting) have
+    # nothing to do.
+    x_final, y_final, _groups_final = engineer.feature_matrix_for_training(
         features, lab_primary, f"label_{PRIMARY_HORIZON}h", include_ecg=include_ecg
     )
     final_model, _ = gbm.fit_predict_proba(x_final, y_final, x_final)

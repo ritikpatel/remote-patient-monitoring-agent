@@ -52,7 +52,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="stream-processor", version="0.1.0", lifespan=_lifespan)
-instrument_metrics(app, "stream-processor")
+instrument_metrics(app)
 instrument_tracing(app, "stream-processor")
 
 

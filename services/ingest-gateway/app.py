@@ -62,7 +62,7 @@ def _default_publisher() -> Publisher:
 
 
 app = FastAPI(title="ingest-gateway", version="0.1.0")
-instrument_metrics(app, "ingest-gateway")
+instrument_metrics(app)
 instrument_tracing(app, "ingest-gateway")
 _publisher: Publisher = _default_publisher()
 

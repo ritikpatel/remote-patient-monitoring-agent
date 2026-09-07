@@ -57,8 +57,6 @@ import pandas as pd
 READMISSION_WINDOW_HOURS = 72.0
 HORIZONS_HOURS = (6, 12)
 
-EVENT_TYPES = ("death", "vasopressor", "ventilation", "icu_readmission")
-
 
 @dataclass(frozen=True)
 class EventTable:

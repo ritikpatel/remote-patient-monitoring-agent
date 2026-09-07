@@ -165,6 +165,11 @@ def _load_fixed_rate_part(
     start = pd.Timestamp(header0[0], tz="UTC")
     hz = float(header1[0])
     data = pd.read_csv(path, skiprows=2, header=None).to_numpy(dtype=float)
+    assert data.shape[1] == n_cols, (
+        f"{path}: expected {n_cols} column(s) for channel {channel!r} "
+        f"(FIXED_RATE_FILES), found {data.shape[1]} -- the file's own header "
+        f"row was never actually checked against this before"
+    )
     n = len(data)
     # tz-aware Timestamps stored in a numpy array come back dtype=object (numpy
     # datetime64 has no tz support), which breaks vectorised arithmetic downstream

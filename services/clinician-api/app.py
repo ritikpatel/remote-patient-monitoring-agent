@@ -53,7 +53,7 @@ DEV_SCOPES = ["patient/*.read", "patient/*.write"]
 DEFAULT_AUDIT_DB_PATH = Path(__file__).resolve().parent / "clinician_api_audit.db"
 
 app = FastAPI(title="clinician-api", version="0.1.0")
-instrument_metrics(app, "clinician-api")
+instrument_metrics(app)
 instrument_tracing(app, "clinician-api")
 
 

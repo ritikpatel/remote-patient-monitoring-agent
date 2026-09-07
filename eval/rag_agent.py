@@ -39,6 +39,11 @@ _agent_module = load_service_app("agent-orchestrator", REPO_ROOT)
 # number reports.
 GROQ_INPUT_COST_PER_1M = 0.15
 GROQ_OUTPUT_COST_PER_1M = 0.60
+assert GROQ_OUTPUT_COST_PER_1M >= GROQ_INPUT_COST_PER_1M, (
+    "GROQ_UPPER_BOUND_COST_PER_1M below assumes the output rate is the more "
+    "expensive of the two -- if Groq's real pricing ever flips this, the "
+    "'upper bound' this axis reports would silently become a lower bound instead."
+)
 # agent-orchestrator's audit rows record combined tokens (input + output), not
 # split -- record_agent_step's "tokens" field is deps.llm's
 # input_tokens + output_tokens (nodes.py's summarizer). Costing the combined

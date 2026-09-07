@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "warehouse" / "mimic4_demo.db"
 
 app = FastAPI(title="risk-engine", version="0.1.0")
-instrument_metrics(app, "risk-engine")
+instrument_metrics(app)
 instrument_tracing(app, "risk-engine")
 
 

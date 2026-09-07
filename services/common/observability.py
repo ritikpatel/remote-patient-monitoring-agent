@@ -18,17 +18,19 @@ import os
 from fastapi import FastAPI
 
 
-def instrument_metrics(app: FastAPI, service_name: str) -> None:
-    """Exposes GET /metrics with real request-count/latency histograms for every
-    route this app serves, labelled by service so one Prometheus can scrape all
-    nine and Grafana can break a dashboard down by `service`.
+def instrument_metrics(app: FastAPI) -> None:
+    """Exposes GET /metrics with real request-count/latency histograms for
+    every route this app serves. No service name to attach here -- each
+    service is its own scrape target in Prometheus's config
+    (infra/observability/prometheus/prometheus.yml's `targets` list), which is
+    what actually gives every metric its per-service `instance` label; this
+    function's job is only to make each service's own numbers real.
     """
     from prometheus_fastapi_instrumentator import Instrumentator
 
     Instrumentator(excluded_handlers=["/metrics"]).instrument(app).expose(
         app, include_in_schema=False
     )
-    app.state.observability_service_name = service_name
 
 
 def instrument_tracing(app: FastAPI, service_name: str) -> None:

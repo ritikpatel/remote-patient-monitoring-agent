@@ -20,7 +20,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent / "alerts.db"
 NOTIFICATION_GATEWAY_URL = os.environ.get("NOTIFICATION_GATEWAY_URL", "http://localhost:8006")
 
 app = FastAPI(title="alert-service", version="0.1.0")
-instrument_metrics(app, "alert-service")
+instrument_metrics(app)
 instrument_tracing(app, "alert-service")
 _store: AlertStore | None = None
 _notify_client: httpx.Client | None = None

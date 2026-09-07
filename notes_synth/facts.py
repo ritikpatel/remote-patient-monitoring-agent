@@ -110,14 +110,13 @@ def extract_facts(
     return FactSet(hadm_id, facts)
 
 
-AddFn = "callable"  # documentation only; typed loosely below to keep helpers terse
-
-
+# Every _add_*_facts helper below takes `add` untyped (kept terse deliberately
+# -- each is a short, private, call-site-obvious closure over one FactSet).
 def _add_admission_facts(conn, hadm_id: int, add) -> None:
     row = conn.execute(
         """
-        SELECT admission_type, admission_location, discharge_location, race,
-               insurance, marital_status, hospital_expire_flag,
+        SELECT admission_type, admission_location, discharge_location,
+               hospital_expire_flag,
                DATE_DIFF('day', admittime, dischtime) AS los_days,
                edregtime IS NOT NULL AS via_ed
         FROM mimiciv_hosp.admissions WHERE hadm_id = ?
@@ -126,7 +125,7 @@ def _add_admission_facts(conn, hadm_id: int, add) -> None:
     ).fetchone()
     if row is None:
         return
-    adm_type, adm_loc, disch_loc, race, insurance, marital, died, los_days, via_ed = row
+    adm_type, adm_loc, disch_loc, died, los_days, via_ed = row
     via = "the Emergency Department" if via_ed else adm_loc.lower()
     add(
         "mimiciv_hosp.admissions",

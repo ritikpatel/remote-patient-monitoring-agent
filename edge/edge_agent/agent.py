@@ -69,12 +69,10 @@ class EdgeAgent:
         self.outbox = outbox
         self.publisher = publisher
         self.sink = sink
-        self.batches_received = 0
         self.observations_published = 0
         self.observations_buffered = 0
 
     def handle_batch(self, batch: WatchBatch) -> None:
-        self.batches_received += 1
         for obs in batch_to_observations(batch):
             self._deliver(obs)
         self.flush_outbox()

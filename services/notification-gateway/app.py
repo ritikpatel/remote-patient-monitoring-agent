@@ -17,7 +17,7 @@ from routing import CHANNEL_DASHBOARD, CHANNEL_PUSH, route_notification  # noqa:
 from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 
 app = FastAPI(title="notification-gateway", version="0.1.0")
-instrument_metrics(app, "notification-gateway")
+instrument_metrics(app)
 instrument_tracing(app, "notification-gateway")
 _push_sender: PushSender = NoopPushSender()
 
