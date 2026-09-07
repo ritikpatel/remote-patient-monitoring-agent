@@ -34,6 +34,22 @@ dependencies = [
     "torch>=2.14.0",
     "wfdb>=4.3.1",
     "reportlab>=5.0.1",
+    # Phase 8 observability infra (infra/compose/docker-compose.yml: Prometheus,
+    # Jaeger). The OTLP/HTTP exporter, not the gRPC one, deliberately -- it needs
+    # only requests+protobuf, not grpcio's compiled dependency, which meaningfully
+    # matters here since every one of the 9 service images installs this same
+    # shared dependency set (services/*/Dockerfile's monorepo pattern).
+    "prometheus-fastapi-instrumentator>=7.0.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+    # Phase 8: real Postgres-backed audit log (services/common/audit.py), alongside
+    # (not replacing) the local-SQLite path every test still uses.
+    "psycopg[binary]>=3.2.0",
+    # Phase 8: real Keycloak-issued token verification (services/common/auth.py) --
+    # PyJWKClient fetches and caches Keycloak's real JWKS for RS256 verification.
+    "cryptography>=43.0.0",
 ]
 
 [dependency-groups]

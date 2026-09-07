@@ -25,7 +25,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -53,6 +53,30 @@ def hash_input(obj: Any) -> str:
     return _sha256(json.dumps(obj, sort_keys=True, default=str))
 
 
+def compute_row_hash(
+    *,
+    timestamp: str,
+    actor: str,
+    action: str,
+    subject_ref: str | None,
+    input_hash: str | None,
+    payload_json: str,
+    prev_hash: str,
+) -> str:
+    """The one hash-chain formula every backend (this module's SQLite AuditLog,
+    audit_postgres.py's PostgresAuditLog) must compute identically -- factored
+    out, rather than left duplicated inline in both `record()` and
+    `verify_chain()` (or worse, reimplemented a third time per backend), because
+    two backends computing "the same" hash slightly differently would make
+    `verify_chain()` reject perfectly good rows written by the other one.
+    """
+    return _sha256(
+        "|".join(
+            [timestamp, actor, action, subject_ref or "", input_hash or "", payload_json, prev_hash]
+        )
+    )
+
+
 @dataclass
 class AuditRow:
     seq: int
@@ -64,6 +88,45 @@ class AuditRow:
     payload: dict[str, Any]
     prev_hash: str
     row_hash: str
+
+
+@runtime_checkable
+class AuditLogProtocol(Protocol):
+    """What every caller (agent-orchestrator's `Dependencies`, clinician-api's
+    `get_audit_log`) actually needs from an audit log -- satisfied structurally
+    by both this module's SQLite `AuditLog` and audit_postgres.py's
+    `PostgresAuditLog` without either inheriting from the other. Typing call
+    sites against this Protocol, not the concrete `AuditLog` class, is what
+    lets `build_audit_log()` return either backend and still type-check.
+    """
+
+    def record(
+        self,
+        actor: str,
+        action: str,
+        payload: dict[str, Any],
+        subject_ref: str | None = None,
+        input_hash: str | None = None,
+    ) -> AuditRow: ...
+
+    def record_agent_step(
+        self,
+        node_name: str,
+        input_data: Any,
+        output: Any,
+        *,
+        tool_calls: list[str] | None = None,
+        model_id: str | None = None,
+        tokens: int | None = None,
+        latency_ms: float | None = None,
+        subject_ref: str | None = None,
+    ) -> AuditRow: ...
+
+    def all_rows(self) -> list[AuditRow]: ...
+
+    def verify_chain(self) -> tuple[bool, int | None]: ...
+
+    def close(self) -> None: ...
 
 
 @dataclass
@@ -106,18 +169,14 @@ class AuditLog:
             timestamp = datetime.now(UTC).isoformat()
             prev_hash = self._last_hash()
             payload_json = json.dumps(payload, sort_keys=True, default=str)
-            row_hash = _sha256(
-                "|".join(
-                    [
-                        timestamp,
-                        actor,
-                        action,
-                        subject_ref or "",
-                        input_hash or "",
-                        payload_json,
-                        prev_hash,
-                    ]
-                )
+            row_hash = compute_row_hash(
+                timestamp=timestamp,
+                actor=actor,
+                action=action,
+                subject_ref=subject_ref,
+                input_hash=input_hash,
+                payload_json=payload_json,
+                prev_hash=prev_hash,
             )
             cur = self.conn.execute(
                 "INSERT INTO audit_log (timestamp, actor, action, subject_ref, input_hash, "
@@ -198,18 +257,14 @@ class AuditLog:
         prev_hash = GENESIS_HASH
         for row in self.all_rows():
             payload_json = json.dumps(row.payload, sort_keys=True, default=str)
-            expected = _sha256(
-                "|".join(
-                    [
-                        row.timestamp,
-                        row.actor,
-                        row.action,
-                        row.subject_ref or "",
-                        row.input_hash or "",
-                        payload_json,
-                        prev_hash,
-                    ]
-                )
+            expected = compute_row_hash(
+                timestamp=row.timestamp,
+                actor=row.actor,
+                action=row.action,
+                subject_ref=row.subject_ref,
+                input_hash=row.input_hash,
+                payload_json=payload_json,
+                prev_hash=prev_hash,
             )
             if row.prev_hash != prev_hash or row.row_hash != expected:
                 return False, row.seq

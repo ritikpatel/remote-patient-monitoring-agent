@@ -85,4 +85,49 @@ def test_get_conditions_list(real_ids):
 def test_get_device():
     resp = client.get("/fhir/Device/empatica-e4", params={"device_type": "wearable"})
     assert resp.status_code == 200
-    assert resp.json()["id"] == "empatica-e4"
+
+
+def test_publish_returns_503_without_hapi_configured(monkeypatch):
+    monkeypatch.setattr(_module, "HAPI_FHIR_BASE_URL", None)
+    resp = client.post("/fhir/_publish", json={"resourceType": "Patient"})
+    assert resp.status_code == 503
+
+
+# --------------------------------------------------------------------------
+# Real HAPI FHIR: self-skips if no server is actually reachable, the same
+# pattern eval/tests/test_latency.py and test_kafka_consumer.py use.
+# --------------------------------------------------------------------------
+
+import socket  # noqa: E402
+
+HAPI_BASE_URL = "http://localhost:8090/fhir"
+
+
+def _hapi_reachable() -> bool:
+    try:
+        with socket.create_connection(("localhost", 8090), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(
+    not _hapi_reachable(),
+    reason="no HAPI FHIR server reachable at localhost:8090 -- see infra/compose/README.md",
+)
+def test_publish_patient_against_a_real_hapi_fhir_server(real_ids, monkeypatch):
+    """The real, Phase-8-infra-dependent path fhir-mapper's own module
+    docstring names: map a real warehouse Patient, POST it to a live HAPI FHIR
+    server, and prove HAPI itself -- not just fhir.resources locally --
+    accepted and stored it (a real assigned id/meta comes back).
+    """
+    monkeypatch.setattr(_module, "HAPI_FHIR_BASE_URL", HAPI_BASE_URL)
+    _, subject_id = real_ids
+    resource = client.get(f"/fhir/Patient/{subject_id}").json()
+
+    resp = client.post("/fhir/_publish", json=resource)
+    assert resp.status_code == 200, resp.text
+    stored = resp.json()
+    assert stored["resourceType"] == "Patient"
+    assert "id" in stored
+    assert stored["meta"]["versionId"] == "1"

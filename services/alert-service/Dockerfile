@@ -6,6 +6,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+COPY services/common/ services/common/
 COPY services/alert-service/app.py services/alert-service/store.py services/alert-service/
 
 ENV PYTHONPATH=/app

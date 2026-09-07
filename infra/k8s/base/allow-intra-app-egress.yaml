@@ -1,0 +1,24 @@
+# The egress half of "allow the 9 services to call each other" -- each
+# chart's own templates/networkpolicy.yaml only opens *ingress* to its own
+# port; this one policy opens *egress* from every capstone-rpm pod to every
+# other capstone-rpm pod, on any port, rather than repeating a per-target-port
+# egress rule in all 9 charts for a call graph that changes as services
+# evolve. The actual restriction still holds: a pod with no `project:
+# capstone-rpm` label (or in a different namespace) gets no egress here at
+# all, and a capstone-rpm pod still can't reach a capstone-rpm Service's port
+# unless that Service's own chart also allows the matching *ingress*.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-app-egress
+  namespace: capstone-rpm
+spec:
+  podSelector:
+    matchLabels:
+      project: capstone-rpm
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              project: capstone-rpm

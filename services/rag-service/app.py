@@ -10,10 +10,14 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from corpus import load_corpus  # noqa: E402
 from retrieval import TfidfIndex  # noqa: E402
+from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 
 app = FastAPI(title="rag-service", version="0.1.0")
+instrument_metrics(app, "rag-service")
+instrument_tracing(app, "rag-service")
 
 # Built once at startup from whatever notes_synth/output currently holds. A real
 # deployment rebuilds this whenever notes_synth/generate.py produces new output

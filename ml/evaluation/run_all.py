@@ -50,7 +50,12 @@ WAREHOUSE_DB = REPO_ROOT / "warehouse" / "mimic4_demo.db"
 ECG_FEATURES_CACHE = REPO_ROOT / "data" / "processed" / "ecg_features.parquet"
 PROMOTED_MODEL_DIR = REPO_ROOT / "ml" / "models" / "promoted"
 REPORT_PATH = REPO_ROOT / "ml" / "evaluation" / "report.md"
-MLFLOW_TRACKING_URI = f"sqlite:///{REPO_ROOT / 'mlruns.db'}"
+# A local sqlite file by default (no infra required); Phase 8's real dockerized
+# MLflow tracking server (infra/compose/docker-compose.yml) is used instead the
+# moment MLFLOW_TRACKING_URI is set, with no code change -- the same
+# infra-presence-is-the-only-switch pattern as every other not-yet-deployed
+# dependency in this project (services/common/publisher.py's KafkaPublisher, etc.).
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", f"sqlite:///{REPO_ROOT / 'mlruns.db'}")
 MLFLOW_EXPERIMENT = "phase5-deterioration"
 
 N_SPLITS = 5

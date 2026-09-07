@@ -12,12 +12,16 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 from store import Alert, AlertStore  # noqa: E402
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "alerts.db"
 NOTIFICATION_GATEWAY_URL = os.environ.get("NOTIFICATION_GATEWAY_URL", "http://localhost:8006")
 
 app = FastAPI(title="alert-service", version="0.1.0")
+instrument_metrics(app, "alert-service")
+instrument_tracing(app, "alert-service")
 _store: AlertStore | None = None
 _notify_client: httpx.Client | None = None
 

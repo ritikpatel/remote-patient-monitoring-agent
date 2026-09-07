@@ -1,0 +1,13 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: groq-api-key
+  namespace: capstone-rpm
+spec:
+  encryptedData:
+    GROQ_API_KEY: AgDmdYG4uIyxMFJRDUICWniHHSzuaWj7kMaiP1E/AAhp8guFid89Jj4FsfU6GIk7b7Wb2wh346Z2FZM3MwvBgmM+eHEPhXNQqvDN5CGWIQiVGxK5TAYEQvrZtxBPtbKzps2xSI/zmAPcD9QIWAKylX20g3u3MTo7Yxhy7tUlYr7zztq4GKiPqU8NWAaOA0xIqpSizGb3Amjfx3KULXQbGyHjHznQnobHOZF4/nn5n0zN/LZ3aQN+CGmu3er+UfeJHkdx4tlaHl1aL2ZV4mXZtI+O+feAxr07BgFDT13dR/3TjYFxTjzr5jiDZJMbVuar2TXwZT1vR1rc7B5D0b5TPTNdl7JOrBcTljtS+LXCpUBWl+DNwCmwFK3B1Y+osf95VM5C0L3N/6lHZU7AsE7GGJ4yG4OoyqzunyKAa1IIrqUF9uutIRxOMQUy8lW1G3adXEIfak04SKQSf+Bew7MWX5ytSXC6HaUfeKLPGAlMYyzDnszx1xmi5D3McoYdGOZBjOr/yIIh7ju9IQUcB+O93hB++XBu9KcXQDcxorF83dwToSV6lW3ODTzwXdm00Za7EtXT1O6UARjLKPfqPz7d39FvcqMeAFZ5gjsfihvy0Y277hqfQB/4WL82nxfLiTSEzkAp7WUAzpnqV9fYYgD9iI51JmtYDsGGhDIMvq6BTMnaxR2/egvdH68n4xD4gSpkolGT9nD+NPlM6CPFw0tTXfp3HvGu14buprkz/DR9IcJM
+  template:
+    metadata:
+      name: groq-api-key
+      namespace: capstone-rpm

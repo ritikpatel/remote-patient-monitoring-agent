@@ -1,0 +1,20 @@
+# PROJECT_PLAN.md section 3, deliverable 11's acceptance test: "NetworkPolicy
+# denies by default." An empty podSelector matches every pod in the
+# namespace; specifying both policyTypes with no `ingress`/`egress` rules
+# means "allow nothing" for either direction -- the actual deny-all, not just
+# a policy that happens to allow everything through an empty rule list.
+#
+# This needs a real NetworkPolicy-enforcing CNI to do anything at all --
+# kind's default CNI (kindnet) does not enforce NetworkPolicy, so
+# infra/k8s/README.md's setup installs Calico first. Every chart's own
+# `templates/networkpolicy.yaml` (ingress) plus the two allow-* policies
+# below (egress) are what claws back exactly the traffic this project's
+# services actually need -- nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: capstone-rpm
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]

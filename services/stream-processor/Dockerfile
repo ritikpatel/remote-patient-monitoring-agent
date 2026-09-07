@@ -7,7 +7,12 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY simulators/arrival_models.json simulators/arrival_models.json
-COPY services/stream-processor/app.py services/stream-processor/windowing.py services/stream-processor/
+COPY services/common/ services/common/
+COPY services/contracts/ services/contracts/
+# kafka_consumer.py: the real Kafka consumer half of the raw.* topic contract
+# (Phase 8) -- needs services/common (observability) and services/contracts
+# (Observation) above it, which is why this COPY is listed after them.
+COPY services/stream-processor/app.py services/stream-processor/windowing.py services/stream-processor/kafka_consumer.py services/stream-processor/
 
 ENV PYTHONPATH=/app
 EXPOSE 8003

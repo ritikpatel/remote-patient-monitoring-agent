@@ -1,0 +1,25 @@
+# A self-signed root, not a real ACME/Let's Encrypt issuer -- this cluster has
+# no public DNS name to prove domain ownership against. "TLS at ingress via
+# cert-manager" (PROJECT_PLAN.md section 14) is demonstrated with the same
+# mechanism (cert-manager issuing and auto-rotating a Certificate, an Ingress
+# terminating TLS with it) a real ACME ClusterIssuer would use -- only the
+# trust root differs.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: risk-engine-tls
+  namespace: capstone-rpm
+spec:
+  secretName: risk-engine-tls
+  dnsNames:
+    - risk-engine.capstone-rpm.svc.cluster.local
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer

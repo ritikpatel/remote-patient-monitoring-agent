@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         app: {{ include "notification-gateway.fullname" . }}
+        project: capstone-rpm
     spec:
       containers:
         - name: notification-gateway

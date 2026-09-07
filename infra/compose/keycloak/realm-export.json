@@ -1,0 +1,48 @@
+{
+  "realm": "capstone-rpm",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 3600,
+  "clientScopes": [
+    { "name": "patient/Observation.read", "protocol": "openid-connect", "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" } },
+    { "name": "patient/Observation.write", "protocol": "openid-connect", "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" } },
+    { "name": "patient/RiskAssessment.read", "protocol": "openid-connect", "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" } },
+    { "name": "patient/Communication.read", "protocol": "openid-connect", "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" } },
+    { "name": "user/Communication.write", "protocol": "openid-connect", "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" } },
+    { "name": "patient/*.read", "protocol": "openid-connect", "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" } }
+  ],
+  "clients": [
+    {
+      "clientId": "clinician-api",
+      "name": "clinician-api (BFF -- SMART-on-FHIR scope enforcement, services/common/auth.py)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "capstone-rpm-dev-not-a-real-secret",
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "defaultClientScopes": [
+        "web-origins", "acr", "roles", "profile", "email",
+        "patient/Observation.read", "patient/RiskAssessment.read", "patient/Communication.read"
+      ],
+      "optionalClientScopes": [
+        "patient/Observation.write", "user/Communication.write", "patient/*.read"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "dr-jdoe",
+      "enabled": true,
+      "email": "jdoe@example.org",
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "credentials": [
+        { "type": "password", "value": "clinician-demo-only", "temporary": false }
+      ]
+    }
+  ]
+}

@@ -25,11 +25,14 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from ml.models import serving  # noqa: E402
+from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "warehouse" / "mimic4_demo.db"
 
 app = FastAPI(title="risk-engine", version="0.1.0")
+instrument_metrics(app, "risk-engine")
+instrument_tracing(app, "risk-engine")
 
 
 def get_conn() -> duckdb.DuckDBPyConnection:

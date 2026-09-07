@@ -11,10 +11,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from push import NoopPushSender, PushSender  # noqa: E402
 from routing import CHANNEL_DASHBOARD, CHANNEL_PUSH, route_notification  # noqa: E402
+from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 
 app = FastAPI(title="notification-gateway", version="0.1.0")
+instrument_metrics(app, "notification-gateway")
+instrument_tracing(app, "notification-gateway")
 _push_sender: PushSender = NoopPushSender()
 
 

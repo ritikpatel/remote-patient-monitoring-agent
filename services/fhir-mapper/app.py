@@ -14,15 +14,17 @@ it already returns exactly the resource HAPI would receive.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import duckdb
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from hapi_client import HapiValidationError, post_resource  # noqa: E402
 from mappers import (  # noqa: E402
     condition_to_fhir,
     device_to_fhir,
@@ -35,12 +37,19 @@ from mappers import (  # noqa: E402
     procedure_to_fhir,
     risk_assessment_to_fhir,
 )
+from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 from services.contracts.observation import Observation  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "warehouse" / "mimic4_demo.db"
+# e.g. "http://hapi-fhir:8080/fhir" -- Phase 8 infra (infra/compose/docker-compose.yml).
+# Unset in every test and any standalone run without it: /fhir/_publish then returns a
+# real 503, not a fabricated "validated" response.
+HAPI_FHIR_BASE_URL = os.environ.get("HAPI_FHIR_BASE_URL")
 
 app = FastAPI(title="fhir-mapper", version="0.1.0")
+instrument_metrics(app, "fhir-mapper")
+instrument_tracing(app, "fhir-mapper")
 
 
 def get_conn() -> duckdb.DuckDBPyConnection:
@@ -50,6 +59,22 @@ def get_conn() -> duckdb.DuckDBPyConnection:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "fhir-mapper"}
+
+
+@app.post("/fhir/_publish")
+def publish_to_hapi(resource: dict = Body(...)) -> dict:
+    """Takes any resource this service already mapped (the JSON any /fhir/*
+    route above returns, unchanged) and actually POSTs it to a live HAPI FHIR
+    server -- the real create-and-validate round trip, not the local
+    fhir.resources/Pydantic construction mappers.py already does. A real 503,
+    not a fabricated pass, when no HAPI is configured.
+    """
+    if not HAPI_FHIR_BASE_URL:
+        raise HTTPException(503, "HAPI_FHIR_BASE_URL not configured -- Phase 8 infra not running")
+    try:
+        return post_resource(resource, HAPI_FHIR_BASE_URL)
+    except HapiValidationError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @app.post("/fhir/Observation")

@@ -1,0 +1,252 @@
+# PROJECT_PLAN.md section 14 (Phase 8): "Kafka, EMQX, Postgres+pgvector, HAPI
+# FHIR, Keycloak, Prometheus, Grafana, Jaeger, MLflow, all nine services."
+#
+# Build context is the repo root (every service Dockerfile's monorepo pattern --
+# see any services/*/Dockerfile's own comment), so this file is always run from
+# there:
+#   set -a; source .env; set +a   # GROQ_API_KEY, if agent-orchestrator's real
+#                                  # LLM path should run instead of its
+#                                  # deterministic no-LLM fallback
+#   docker compose -f infra/compose/docker-compose.yml up -d
+#
+# infra/compose/README.md documents what was verified against a real, running
+# instance of each of these (component by component -- not one simultaneous
+# `up` of the whole stack; see that file for why) and how to reproduce it.
+
+name: capstone-rpm
+
+services:
+  # --------------------------------------------------------------------------
+  # Message bus / ingress
+  # --------------------------------------------------------------------------
+
+  kafka:
+    image: apache/kafka:3.7.0
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # Two listeners advertising two different addresses, not one -- a broker
+      # can only advertise a single address per listener to every client
+      # uniformly, so INTERNAL (what ingest-gateway/stream-processor use, over
+      # the compose network) and EXTERNAL (what the host -- pytest,
+      # kafka-topics.sh from a laptop shell -- uses) have to be separate
+      # listeners. Found for real: a single PLAINTEXT listener advertising
+      # "kafka:9092" made every in-container service work but silently broke
+      # every host-side kafka-python client (DNS lookup failure on "kafka"),
+      # including this project's own self-skipping pytest suite
+      # (services/stream-processor/tests/test_kafka_consumer.py), which had
+      # been developed and verified against a standalone `docker run` Kafka
+      # advertising "localhost:9092" -- a config this compose file did not yet
+      # match.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      CLUSTER_ID: Mk3OEYBSD34fcwNTJENDM2Qk
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  emqx:
+    image: emqx/emqx:5.7.1
+    ports:
+      - "1883:1883" # MQTT
+      - "18083:18083" # dashboard
+    healthcheck:
+      test: ["CMD", "emqx_ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # --------------------------------------------------------------------------
+  # Data stores
+  # --------------------------------------------------------------------------
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: capstone
+      POSTGRES_PASSWORD: capstone
+      POSTGRES_DB: capstone
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U capstone"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  hapi-fhir:
+    image: hapiproject/hapi:v7.2.0
+    ports: ["8090:8080"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/fhir/metadata > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s # HAPI's JVM cold start is genuinely this slow
+
+  # --------------------------------------------------------------------------
+  # Identity
+  # --------------------------------------------------------------------------
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: ["start-dev", "--import-realm"]
+    ports: ["8180:8080"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # --------------------------------------------------------------------------
+  # Observability
+  # --------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports: ["3001:3000"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on: [prometheus]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    ports:
+      - "16686:16686" # UI
+      - "4318:4318" # OTLP/HTTP receiver
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.1
+    ports: ["5000:5000"]
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlruns.db
+      --default-artifact-root /mlflow/artifacts
+    volumes:
+      - mlflow-data:/mlflow
+
+  # --------------------------------------------------------------------------
+  # The 9 FastAPI services (PROJECT_PLAN.md section 10) -- one Dockerfile each,
+  # built from the repo root. Each mounts the read-only warehouse DB it reads
+  # from directly rather than baking a MIMIC-derived artefact into an image
+  # (docs/DATA_USE.md; the same reason it's gitignored).
+  # --------------------------------------------------------------------------
+
+  ingest-gateway:
+    build: { context: ../.., dockerfile: services/ingest-gateway/Dockerfile }
+    ports: ["8000:8000"]
+    environment:
+      PUBLISHER_BACKEND: kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    depends_on:
+      kafka: { condition: service_healthy }
+
+  stream-processor:
+    build: { context: ../.., dockerfile: services/stream-processor/Dockerfile }
+    ports: ["8003:8003"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    depends_on:
+      kafka: { condition: service_healthy }
+
+  risk-engine:
+    build: { context: ../.., dockerfile: services/risk-engine/Dockerfile }
+    ports: ["8001:8001"]
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    volumes:
+      - ../../warehouse/mimic4_demo.db:/app/warehouse/mimic4_demo.db:ro
+      - ../../ml/models/promoted:/app/ml/models/promoted:ro
+
+  fhir-mapper:
+    build: { context: ../.., dockerfile: services/fhir-mapper/Dockerfile }
+    ports: ["8002:8002"]
+    environment:
+      HAPI_FHIR_BASE_URL: http://hapi-fhir:8080/fhir
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    volumes:
+      - ../../warehouse/mimic4_demo.db:/app/warehouse/mimic4_demo.db:ro
+    depends_on:
+      hapi-fhir: { condition: service_healthy }
+
+  rag-service:
+    build: { context: ../.., dockerfile: services/rag-service/Dockerfile }
+    ports: ["8004:8004"]
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+
+  alert-service:
+    build: { context: ../.., dockerfile: services/alert-service/Dockerfile }
+    ports: ["8005:8005"]
+    environment:
+      NOTIFICATION_GATEWAY_URL: http://notification-gateway:8006
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+
+  notification-gateway:
+    build: { context: ../.., dockerfile: services/notification-gateway/Dockerfile }
+    ports: ["8006:8006"]
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+
+  clinician-api:
+    build: { context: ../.., dockerfile: services/clinician-api/Dockerfile }
+    ports: ["8007:8007"]
+    environment:
+      RISK_ENGINE_URL: http://risk-engine:8001
+      ALERT_SERVICE_URL: http://alert-service:8005
+      RAG_SERVICE_URL: http://rag-service:8004
+      AGENT_ORCHESTRATOR_URL: http://agent-orchestrator:8008
+      AUDIT_DATABASE_URL: postgresql://capstone:capstone@postgres:5432/capstone
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/capstone-rpm/protocol/openid-connect/certs
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/capstone-rpm
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    depends_on:
+      postgres: { condition: service_healthy }
+      keycloak: { condition: service_healthy }
+
+  agent-orchestrator:
+    build: { context: ../.., dockerfile: services/agent-orchestrator/Dockerfile }
+    ports: ["8008:8008"]
+    environment:
+      RISK_ENGINE_URL: http://risk-engine:8001
+      RAG_SERVICE_URL: http://rag-service:8004
+      AUDIT_DATABASE_URL: postgresql://capstone:capstone@postgres:5432/capstone
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    volumes:
+      - ../../warehouse/mimic4_demo.db:/app/warehouse/mimic4_demo.db:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  postgres-data:
+  mlflow-data:

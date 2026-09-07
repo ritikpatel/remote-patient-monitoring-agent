@@ -8,6 +8,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY notes_synth/output/notes/ notes_synth/output/notes/
 COPY notes_synth/output/fact_ledger.parquet notes_synth/output/fact_ledger.parquet
+COPY services/common/ services/common/
 COPY services/rag-service/app.py services/rag-service/corpus.py services/rag-service/retrieval.py services/rag-service/
 
 ENV PYTHONPATH=/app

@@ -21,6 +21,7 @@ transport pattern already established in edge/edge_agent/transport.py.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +29,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from services.common.publisher import InMemoryPublisher, Publisher, topic_for  # noqa: E402
+from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
+from services.common.publisher import (  # noqa: E402
+    InMemoryPublisher,
+    JSONLPublisher,
+    Publisher,
+    topic_for,  # noqa: E402
+)
 from services.contracts.observation import Observation  # noqa: E402
 
 # A real deployment reads this from a secret store (env var backed by Vault/sealed-
@@ -36,8 +43,28 @@ from services.contracts.observation import Observation  # noqa: E402
 # no secret manager running in this environment either.
 DEFAULT_API_KEY = "capstone-rpm-dev-ingest-key"
 
+
+def _default_publisher() -> Publisher:
+    """PUBLISHER_BACKEND selects the real KafkaPublisher once Phase 8's broker
+    exists; unset (every test, and any standalone run without docker-compose)
+    keeps today's InMemoryPublisher default so nothing else changes behaviour.
+    """
+    backend = os.environ.get("PUBLISHER_BACKEND", "memory").lower()
+    if backend == "kafka":
+        from services.common.publisher import KafkaPublisher
+
+        return KafkaPublisher(
+            bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+        )
+    if backend == "jsonl":
+        return JSONLPublisher(directory=Path(os.environ.get("JSONL_DIR", "/tmp/ingest-jsonl")))
+    return InMemoryPublisher()
+
+
 app = FastAPI(title="ingest-gateway", version="0.1.0")
-_publisher: Publisher = InMemoryPublisher()
+instrument_metrics(app, "ingest-gateway")
+instrument_tracing(app, "ingest-gateway")
+_publisher: Publisher = _default_publisher()
 
 
 def set_publisher(publisher: Publisher) -> None:

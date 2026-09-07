@@ -19,3 +19,15 @@ resources:
 env: {}
   # RISK_ENGINE_URL, RAG_SERVICE_URL, etc. -- set per service that proxies to
   # another one (see each app.py's os.environ.get(...) defaults).
+
+# Phase 8 (PROJECT_PLAN.md section 14): resiliency and network-security
+# defaults for every chart. minAvailable: 0 is deliberate at replicaCount: 1
+# -- a PDB requiring 1-of-1 available would block voluntary disruptions
+# (node drains, rolling upgrades) entirely on a single replica; turn this up
+# once replicaCount > 1 in a real deployment.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 0
+
+networkPolicy:
+  enabled: true

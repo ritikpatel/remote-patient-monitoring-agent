@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from graph import build_graph  # noqa: E402
 from nodes import Dependencies, LLMBackend  # noqa: E402
 from notes_synth.backends import GroqBackend  # noqa: E402
-from services.common.audit import AuditLog  # noqa: E402
+from services.common.audit_postgres import build_audit_log  # noqa: E402
+from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "warehouse" / "mimic4_demo.db"
@@ -31,6 +32,8 @@ RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8001")
 RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8004")
 
 app = FastAPI(title="agent-orchestrator", version="0.1.0")
+instrument_metrics(app, "agent-orchestrator")
+instrument_tracing(app, "agent-orchestrator")
 _deps: Dependencies | None = None
 
 
@@ -47,7 +50,9 @@ def get_deps() -> Dependencies:
             db_path=DEFAULT_DB_PATH,
             risk_engine_client=httpx.Client(base_url=RISK_ENGINE_URL),
             rag_client=httpx.Client(base_url=RAG_SERVICE_URL),
-            audit_log=AuditLog(DEFAULT_AUDIT_DB_PATH),
+            audit_log=build_audit_log(
+                DEFAULT_AUDIT_DB_PATH, postgres_dsn=os.environ.get("AUDIT_DATABASE_URL")
+            ),
             llm=_default_llm(),
         )
     return _deps

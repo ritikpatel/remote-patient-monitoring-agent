@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         app: {{ include "alert-service.fullname" . }}
+        project: capstone-rpm
     spec:
       containers:
         - name: alert-service

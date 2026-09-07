@@ -33,8 +33,10 @@ from fastapi.responses import JSONResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from services.common.audit import AuditLog  # noqa: E402
+from services.common.audit import AuditLogProtocol  # noqa: E402
+from services.common.audit_postgres import build_audit_log  # noqa: E402
 from services.common.auth import AuthContext, issue_local_test_token, require_scope  # noqa: E402
+from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8001")
 ALERT_SERVICE_URL = os.environ.get("ALERT_SERVICE_URL", "http://localhost:8005")
@@ -51,6 +53,8 @@ DEV_SCOPES = ["patient/*.read", "patient/*.write"]
 DEFAULT_AUDIT_DB_PATH = Path(__file__).resolve().parent / "clinician_api_audit.db"
 
 app = FastAPI(title="clinician-api", version="0.1.0")
+instrument_metrics(app, "clinician-api")
+instrument_tracing(app, "clinician-api")
 
 
 @app.exception_handler(httpx.TimeoutException)
@@ -64,7 +68,7 @@ async def timeout_handler(request: Request, exc: httpx.TimeoutException) -> JSON
 
 
 _clients: dict[str, httpx.AsyncClient] = {}
-_audit_log: AuditLog | None = None
+_audit_log: AuditLogProtocol | None = None
 
 
 def configure_clients(
@@ -98,14 +102,16 @@ def get_client(name: str, base_url: str) -> httpx.AsyncClient:
     return _clients[name]
 
 
-def get_audit_log() -> AuditLog:
+def get_audit_log() -> AuditLogProtocol:
     global _audit_log
     if _audit_log is None:
-        _audit_log = AuditLog(DEFAULT_AUDIT_DB_PATH)
+        _audit_log = build_audit_log(
+            DEFAULT_AUDIT_DB_PATH, postgres_dsn=os.environ.get("AUDIT_DATABASE_URL")
+        )
     return _audit_log
 
 
-def set_audit_log(log: AuditLog) -> None:
+def set_audit_log(log: AuditLogProtocol) -> None:
     global _audit_log
     _audit_log = log
 

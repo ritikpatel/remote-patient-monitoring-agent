@@ -1,0 +1,12 @@
+# A single-node kind cluster with the default CNI disabled -- kindnet (kind's
+# built-in CNI) does not enforce NetworkPolicy at all, which would make
+# "NetworkPolicy denies by default" (PROJECT_PLAN.md section 3, deliverable
+# 11's acceptance test) untestable: every policy would silently do nothing.
+# infra/k8s/README.md's setup steps install Calico afterward for real
+# enforcement.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+nodes:
+  - role: control-plane

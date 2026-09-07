@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         app: {{ include "agent-orchestrator.fullname" . }}
+        project: capstone-rpm
     spec:
       containers:
         - name: agent-orchestrator

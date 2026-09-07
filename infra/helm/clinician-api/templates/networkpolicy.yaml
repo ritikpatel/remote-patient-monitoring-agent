@@ -1,0 +1,24 @@
+{{- if .Values.networkPolicy.enabled }}
+# Ingress only, deliberately -- infra/k8s/base/default-deny.yaml denies both
+# directions cluster-wide first; this chart only needs to open a hole for
+# *inbound* traffic to its own port. Egress (calling its own dependencies,
+# plus DNS) is opened once, namespace-wide, by
+# infra/k8s/base/allow-intra-app-egress.yaml and allow-dns-egress.yaml rather
+# than duplicated in every one of the 9 charts.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "clinician-api.fullname" . }}-allow-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ include "clinician-api.fullname" . }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              project: capstone-rpm
+      ports:
+        - port: {{ .Values.service.port }}
+{{- end }}

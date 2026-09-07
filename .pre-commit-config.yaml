@@ -41,6 +41,10 @@ repos:
         # instead (see infra/helm/README.md), which renders the templates before
         # parsing.
         exclude: ^infra/helm/[^/]+/templates/
+        # Kubernetes manifests routinely bundle several resources in one file
+        # separated by "---" (e.g. infra/k8s/tls/cluster-issuer.yaml's
+        # ClusterIssuer + Certificate) -- standard practice, not malformed YAML.
+        args: [--allow-multiple-documents]
       - id: check-added-large-files
         args: [--maxkb=5120]
         exclude: ^notebooks/

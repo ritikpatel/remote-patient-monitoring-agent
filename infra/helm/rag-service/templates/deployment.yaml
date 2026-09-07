@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         app: {{ include "rag-service.fullname" . }}
+        project: capstone-rpm
     spec:
       containers:
         - name: rag-service

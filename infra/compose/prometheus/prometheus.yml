@@ -1,0 +1,20 @@
+# Scrapes every service's real /metrics endpoint (services/common/observability.py's
+# instrument_metrics(), wired into all 9 app.py files) -- not a synthetic exporter.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: capstone-rpm-services
+    static_configs:
+      - targets:
+          - ingest-gateway:8000
+          - risk-engine:8001
+          - fhir-mapper:8002
+          - stream-processor:8003
+          - rag-service:8004
+          - alert-service:8005
+          - notification-gateway:8006
+          - clinician-api:8007
+          - agent-orchestrator:8008
+        labels:
+          project: capstone-rpm

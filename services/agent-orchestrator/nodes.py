@@ -30,7 +30,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from services.common.audit import AuditLog  # noqa: E402
+from services.common.audit import AuditLogProtocol  # noqa: E402
 from state import AgentState  # noqa: E402
 
 # The ICU-recalibrated tier that escalates regardless of any LLM opinion (E5: the
@@ -56,7 +56,7 @@ class Dependencies:
     db_path: Path
     risk_engine_client: httpx.Client
     rag_client: httpx.Client
-    audit_log: AuditLog
+    audit_log: AuditLogProtocol
     llm: (
         LLMBackend | None
     )  # None disables the two LLM-touching nodes' generation (falls back to a fixed note)

@@ -6,6 +6,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+COPY services/common/ services/common/
 COPY services/notification-gateway/app.py services/notification-gateway/push.py services/notification-gateway/routing.py services/notification-gateway/
 
 ENV PYTHONPATH=/app

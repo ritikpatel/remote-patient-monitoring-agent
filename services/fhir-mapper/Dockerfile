@@ -9,7 +9,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY services/common/ services/common/
 COPY services/contracts/ services/contracts/
 COPY warehouse/build_duckdb.py warehouse/__init__.py warehouse/
-COPY services/fhir-mapper/app.py services/fhir-mapper/mappers.py services/fhir-mapper/
+COPY services/fhir-mapper/app.py services/fhir-mapper/mappers.py services/fhir-mapper/hapi_client.py services/fhir-mapper/
 
 ENV PYTHONPATH=/app
 EXPOSE 8002

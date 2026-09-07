@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         app: {{ include "risk-engine.fullname" . }}
+        project: capstone-rpm
     spec:
       containers:
         - name: risk-engine
