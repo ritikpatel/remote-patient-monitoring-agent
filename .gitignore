@@ -19,6 +19,11 @@ eda_outputs/
 reports/output/*
 !reports/output/.gitkeep
 
+# Phase 7 evaluation outputs (eval/run_eval.py) are regenerable -- same
+# reasoning as reports/output/ above.
+eval/output/*
+!eval/output/.gitkeep
+
 # --- Python ---
 .venv/
 __pycache__/

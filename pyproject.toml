@@ -70,7 +70,7 @@ warn_unused_ignores = true
 exclude = ["notebooks/", "data/"]
 
 [tool.pytest.ini_options]
-testpaths = ["ml", "warehouse", "simulators", "services", "edge", "notes_synth", "reports"]
+testpaths = ["ml", "warehouse", "simulators", "services", "edge", "notes_synth", "reports", "eval"]
 # importlib mode: service directories are hyphenated (ingest-gateway, ...), which is
 # not a valid Python package name, and several services each have their own
 # tests/test_app.py -- importlib mode identifies modules by file path rather than
