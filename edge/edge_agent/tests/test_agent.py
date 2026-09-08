@@ -66,6 +66,67 @@ def test_agent_buffers_everything_with_no_publisher(tmp_path):
     outbox.close()
 
 
+def test_a_delivering_sink_is_not_also_buffered(tmp_path):
+    """`--sink http` posts to ingest-gateway, so those observations have left the
+    device and must not also pile up in the MQTT retry buffer.
+
+    Regression test for behaviour observed the first time the HTTP sink was run
+    end-to-end: 120 observations were accepted by a real gateway *and* all 120
+    were written to the outbox, which nothing would ever drain (`flush_outbox`
+    returns immediately without a connected publisher). The outbox would have
+    grown without bound on a long-running edge device.
+    """
+
+    class RecordingSink:
+        def __init__(self) -> None:
+            self.emitted = 0
+
+        def emit(self, obs) -> None:  # noqa: ANN001 -- matches the Sink protocol
+            self.emitted += 1
+
+        def close(self) -> None:
+            pass
+
+    outbox = Outbox(tmp_path / "outbox.db")
+    sink = RecordingSink()
+    agent = EdgeAgent(outbox, publisher=None, sink=sink, sink_delivers=True)
+    batches = make_demo_batches(minutes=1.0, seed=3)
+    replay_path = tmp_path / "batches.jsonl"
+    write_replay_file(replay_path, batches)
+
+    asyncio.run(run(ReplayTransport(replay_path, sleep=False), agent))
+
+    assert sink.emitted > 0
+    assert agent.observations_published == sink.emitted
+    assert agent.observations_buffered == 0
+    assert outbox.pending_count() == 0
+    outbox.close()
+
+
+def test_a_debug_sink_still_buffers(tmp_path):
+    """The console/jsonl sinks deliver nothing off the device, so the old
+    data-preserving behaviour must survive the change above."""
+
+    class NullSink:
+        def emit(self, obs) -> None:  # noqa: ANN001
+            pass
+
+        def close(self) -> None:
+            pass
+
+    outbox = Outbox(tmp_path / "outbox.db")
+    agent = EdgeAgent(outbox, publisher=None, sink=NullSink(), sink_delivers=False)
+    batches = make_demo_batches(minutes=1.0, seed=4)
+    replay_path = tmp_path / "batches.jsonl"
+    write_replay_file(replay_path, batches)
+
+    asyncio.run(run(ReplayTransport(replay_path, sleep=False), agent))
+
+    assert agent.observations_published == 0
+    assert agent.observations_buffered == outbox.pending_count() > 0
+    outbox.close()
+
+
 def test_agent_falls_back_to_buffering_when_broker_unreachable(tmp_path):
     outbox = Outbox(tmp_path / "outbox.db")
     publisher = MqttPublisher(MqttConfig(host="127.0.0.1", port=18830, connect_timeout_s=0.5))

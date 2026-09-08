@@ -48,7 +48,7 @@ from services.contracts.observation import (  # noqa: E402
 )
 from warehouse.news2 import hr_score, spo2_score  # noqa: E402
 
-from simulators.sinks import Sink, make_sink  # noqa: E402
+from simulators.sinks import DEFAULT_INGEST_API_KEY, Sink, make_sink  # noqa: E402
 from simulators.wearable_replay import (  # noqa: E402
     ACTIVITIES,
     DEFAULT_ROOT,
@@ -270,8 +270,19 @@ def main() -> int:
     ap.add_argument("--end-score", type=float, default=6.0)
     ap.add_argument("--gamma", type=float, default=1.0)
     ap.add_argument("--compress", type=float, default=1.0)
-    ap.add_argument("--sink", choices=["console", "jsonl"], default="console")
+    # `http` was missing here while real_event_replay and wearable_replay both had it
+    # (finding F3), which meant the one producer that actually generates
+    # deterioration was the one producer that could not reach the alerting
+    # pipeline it exists to exercise. A healthy replay could reach the engine; a
+    # deteriorating one could not.
+    ap.add_argument("--sink", choices=["console", "jsonl", "http"], default="console")
     ap.add_argument("--out", type=Path, default=Path("morphed.jsonl"))
+    ap.add_argument(
+        "--gateway-url",
+        default="http://localhost:8000",
+        help="ingest-gateway base URL for --sink http",
+    )
+    ap.add_argument("--api-key", default=DEFAULT_INGEST_API_KEY, help="X-API-Key for --sink http")
     ap.add_argument("--no-sleep", action="store_true")
     ap.add_argument("--list", action="store_true")
     args = ap.parse_args()
@@ -310,7 +321,7 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    sink: Sink = make_sink(args.sink, args.out)
+    sink: Sink = make_sink(args.sink, args.out, gateway_url=args.gateway_url, api_key=args.api_key)
     try:
         replay(observations, sink, compress=args.compress, sleep=not args.no_sleep)
     finally:

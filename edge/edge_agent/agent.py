@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from services.contracts.observation import Observation, ObservationSource  # noqa: E402
-from simulators.sinks import Sink, make_sink  # noqa: E402
+from simulators.sinks import DEFAULT_INGEST_API_KEY, Sink, make_sink  # noqa: E402
 
 from edge.edge_agent.features import summarize_batch  # noqa: E402
 from edge.edge_agent.mqtt_publisher import MqttConfig, MqttPublisher  # noqa: E402
@@ -65,10 +65,31 @@ def batch_to_observations(batch: WatchBatch) -> list[Observation]:
 
 
 class EdgeAgent:
-    def __init__(self, outbox: Outbox, publisher: MqttPublisher | None, sink: Sink | None) -> None:
+    """Turns watch batches into Observations and gets them off the device.
+
+    ``sink_delivers`` says whether ``sink`` is a real transport to the server
+    (``--sink http``, which posts to ingest-gateway) rather than a local debug
+    output (console/jsonl). It matters because the outbox is specifically the
+    **MQTT** path's retry buffer: ``flush_outbox`` only ever drains through a
+    connected publisher. So when HTTP is the delivery route and no broker is
+    configured, buffering every already-delivered observation would grow the
+    SQLite outbox without bound and with nothing able to empty it -- observed
+    directly the first time ``--sink http`` was run (120 delivered, 120 also
+    "buffered"). Debug sinks keep the old behaviour exactly: they deliver
+    nothing, so buffering is still the correct, data-preserving choice.
+    """
+
+    def __init__(
+        self,
+        outbox: Outbox,
+        publisher: MqttPublisher | None,
+        sink: Sink | None,
+        sink_delivers: bool = False,
+    ) -> None:
         self.outbox = outbox
         self.publisher = publisher
         self.sink = sink
+        self.sink_delivers = sink_delivers
         self.observations_published = 0
         self.observations_buffered = 0
 
@@ -81,6 +102,9 @@ class EdgeAgent:
         if self.sink is not None:
             self.sink.emit(obs)
         if self.publisher is not None and self.publisher.connected and self.publisher.publish(obs):
+            self.observations_published += 1
+        elif self.sink_delivers and self.publisher is None:
+            # Delivered over HTTP, and no MQTT path exists to retry on.
             self.observations_published += 1
         else:
             self.outbox.add(obs)
@@ -163,8 +187,24 @@ def main() -> int:
     run_p.add_argument("--no-sleep", action="store_true")
     run_p.add_argument("--max-batches", type=int, default=None)
     run_p.add_argument("--outbox", type=Path, default=DEFAULT_OUTBOX_PATH)
-    run_p.add_argument("--sink", choices=["none", "console", "jsonl"], default="console")
+    run_p.add_argument("--sink", choices=["none", "console", "jsonl", "http"], default="console")
     run_p.add_argument("--out", type=Path, default=Path("edge_observations.jsonl"))
+    # `http` posts straight into a running ingest-gateway, which is what closes
+    # watch -> server -> risk-engine -> alert-service without an MQTT broker in
+    # between. The MQTT path below is the production design (and is real code),
+    # but nothing subscribes MQTT -> ingest-gateway in this repo yet
+    # (services/ingest-gateway/app.py's module docstring says so), so it cannot
+    # currently reach the scoring services on its own. Same HTTPSink the ICU and
+    # wearable replays use, so all three producers reach the pipeline by one
+    # tested route rather than three.
+    run_p.add_argument(
+        "--gateway-url",
+        default="http://localhost:8000",
+        help="ingest-gateway base URL for --sink http",
+    )
+    run_p.add_argument(
+        "--api-key", default=DEFAULT_INGEST_API_KEY, help="X-API-Key for --sink http"
+    )
     run_p.add_argument("--mqtt-host")
     run_p.add_argument("--mqtt-port", type=int, default=8883)
     run_p.add_argument("--ca-cert", type=Path)
@@ -210,8 +250,12 @@ def main() -> int:
         print(f"MQTT connect to {config.host}:{config.port}: {status}", file=sys.stderr)
 
     outbox = Outbox(args.outbox)
-    sink = None if args.sink == "none" else make_sink(args.sink, args.out)
-    agent = EdgeAgent(outbox, publisher, sink)
+    sink = (
+        None
+        if args.sink == "none"
+        else make_sink(args.sink, args.out, gateway_url=args.gateway_url, api_key=args.api_key)
+    )
+    agent = EdgeAgent(outbox, publisher, sink, sink_delivers=args.sink == "http")
 
     try:
         n = asyncio.run(run(transport, agent, max_batches=args.max_batches))

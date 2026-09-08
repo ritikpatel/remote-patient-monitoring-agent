@@ -40,6 +40,16 @@ Expect 668,862 / 12,004 / 140 — the same numbers as the EDA notebook.
 
 To rebuild from scratch (~4 min): `.venv/bin/python warehouse/build_duckdb.py && .venv/bin/python warehouse/run_concepts.py`
 
+**Scaling past the demo.** The same scripts build a full MIMIC-IV release, with
+`--cohort-subjects N` loading a seeded sample of N ICU patients rather than the
+whole thing (a whole-release warehouse is tens of GB). Start with
+`.venv/bin/python warehouse/fetch_mimic4.py`, which checks the landing zone and
+this machine's disk and prints the credentialed-download command for you to run —
+it downloads nothing and never handles a credential. How large a cohort is
+answered by measurement, not guesswork:
+[`ml/evaluation/reliability_report.md`](ml/evaluation/reliability_report.md).
+See [`warehouse/README.md`](warehouse/README.md) for the full sequence.
+
 ## 3. Infrastructure (~40s to healthy)
 
 ```bash
@@ -163,13 +173,13 @@ curl -s -X POST http://localhost:8002/fhir/_publish -H 'content-type: applicatio
 Console first, to show the wire shape: one ICU hour per wall-clock second, LOINC-coded, with
 `imputed` flags on carried-forward values.
 ```bash
-.venv/bin/python simulators/icu_replay.py --stay-id 34617352 --compress 3600
+.venv/bin/python simulators/real_event_replay.py --stay-id 34617352 --compress 3600
 ```
 
 Then the same replay into the running pipeline. **This is deliverable 1's acceptance test**, and
 it needs `stream-processor` started with the escalation env vars from step 5:
 ```bash
-.venv/bin/python simulators/icu_replay.py --stay-id 34807493 --compress 3600 --sink http --no-sleep
+.venv/bin/python simulators/real_event_replay.py --stay-id 34807493 --compress 3600 --sink http --no-sleep
 curl -s http://localhost:8003/escalation/stats | .venv/bin/python -m json.tool
 curl -s http://localhost:8005/alerts/active | .venv/bin/python -m json.tool
 ```

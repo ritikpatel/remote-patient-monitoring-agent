@@ -1,4 +1,4 @@
-"""Where a replay simulator's Observations go. Shared by icu_replay.py and
+"""Where a replay simulator's Observations go. Shared by real_event_replay.py and
 wearable_replay.py so both producers write the exact same wire shapes.
 
 ConsoleSink and JSONLSink are deliberately dependency-free, so both simulators stay

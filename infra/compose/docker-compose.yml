@@ -177,6 +177,12 @@ services:
     ports: ["8003:8003"]
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # Without BOTH of these the EscalationLoop (finding F3) silently does not
+      # build, and the stack ingests and windows observations while never scoring
+      # or alerting -- exactly the "every piece present, nothing joined" state F3
+      # was raised to fix. /escalation/stats reports which case you are in.
+      RISK_ENGINE_URL: http://risk-engine:8001
+      ALERT_SERVICE_URL: http://alert-service:8005
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     depends_on:
       kafka: { condition: service_healthy }

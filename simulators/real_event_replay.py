@@ -1,4 +1,18 @@
-"""Replay one ICU stay's hourly grid as a stream of Observation messages.
+"""Replay one patient's full multi-channel physiology as a live Observation stream.
+
+**This is the project's PRIMARY test input.** It is the only producer that emits
+every channel the risk model was trained on, which is what makes it a valid
+end-to-end exercise of the real scoring path; the Wear OS / wearable producers
+are secondary, and exercise transport rather than the model's full feature set.
+
+The source rows are real recorded ICU physiology. In the post-discharge framing
+this stands in for a complete home sensor suite -- one device or several -- that
+reports the same channels. That assumption is deliberately generous and is not
+uniformly true: heart rate, respiratory rate, SpO2, blood pressure and glucose
+all have real consumer or clinical home devices, but **core temperature, GCS and
+FiO2 do not**, and `has_arterial_line` is a hospital fact that is always 0 once a
+patient is home. Those are precisely the channels a channel-dropout evaluation
+should be run over before any post-discharge claim is made.
 
 PROJECT_PLAN.md section 8, item 3. Two things distinguish this from "read a table and
 print a row every second":
@@ -20,8 +34,9 @@ anything other than what it is: hourly-charted data played back faster than it w
 recorded (R7 / PROJECT_PLAN.md section 17).
 
 Usage:
-    python simulators/icu_replay.py --stay-id 34547401 --compress 3600
-    python simulators/icu_replay.py --stay-id 34547401 --sink jsonl --out replay.jsonl --no-sleep
+    python simulators/real_event_replay.py --stay-id 34547401 --compress 3600
+    python simulators/real_event_replay.py --stay-id 34547401 \
+        --sink jsonl --out replay.jsonl --no-sleep
 """
 
 from __future__ import annotations
@@ -140,7 +155,7 @@ def main() -> int:
         default=DEFAULT_INGEST_API_KEY,
         help="X-API-Key for --sink http",
     )
-    ap.add_argument("--out", type=Path, default=Path("icu_replay.jsonl"))
+    ap.add_argument("--out", type=Path, default=Path("real_event_replay.jsonl"))
     ap.add_argument(
         "--no-sleep",
         action="store_true",

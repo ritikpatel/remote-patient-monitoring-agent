@@ -8,8 +8,9 @@ device_id -> Observation.device) so that services/fhir-mapper in Phase 4 is a
 projection of already-FHIR-shaped fields onto a FHIR resource, not a translation
 between two different data models.
 
-Three producers satisfy this contract: simulators/icu_replay.py, simulators/wearable_replay.py
-(true-rate and morphed), and eventually the Wear OS edge agent (edge/edge_agent/). All three
+Three producers satisfy this contract: simulators/real_event_replay.py (the PRIMARY
+test input -- every channel the model trains on), simulators/wearable_replay.py
+(true-rate and morphed), and the Wear OS edge agent (edge/edge_agent/). All three
 import Observation and CHANNELS from here rather than redefining fields.
 
 Wire format: Avro, schemaless (single-object encoding via fastavro's
