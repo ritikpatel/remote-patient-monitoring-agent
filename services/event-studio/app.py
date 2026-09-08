@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import duckdb  # noqa: E402
+import sms  # noqa: E402
 from generator import generate  # noqa: E402
 from services.contracts.observation import Observation, ObservationSource, QualityFlag  # noqa: E402
 from simulators.sinks import DEFAULT_INGEST_API_KEY  # noqa: E402
@@ -166,16 +167,11 @@ def make_event(req: EventRequest) -> dict:
 
 
 def send_sms(patient_ref: str, news2: int, why: str) -> dict:
-    """Dry-run unless SMS_MODE=live AND a provider is configured.
+    """Compose the escalation SMS and hand it to the guarded sender.
 
-    No provider is wired here on purpose. Paging a real phone is an outward
-    action needing an account, credentials and a clinician who consented to be
-    contacted; defaulting to a live send would make an accidental demo run text
-    a real person.
+    Dry run unless `SMS_MODE=live` and a provider is fully configured; see
+    `sms.py` for the four guards, each of which fails closed. Nothing about the
+    demo path changes when it is off -- the composed text is still returned and
+    shown in the UI, so what *would* be sent is always visible.
     """
-    text = (
-        f"[SYNTHETIC DRILL] {patient_ref}: NEWS2 {news2}, escalation - {why}. Not a real patient."
-    )
-    if SMS_MODE != "live":
-        return {"mode": "dry_run", "to": os.environ.get("CLINICIAN_PHONE", "<unset>"), "text": text}
-    return {"mode": "live", "error": "no SMS provider configured; see this module's docstring"}
+    return sms.send(sms.compose(patient_ref, news2, why)).as_dict()

@@ -46,18 +46,44 @@ cut-points are read from `capstone.news2_thresholds` at runtime rather than
 mirrored, because `news2.py` derives them per-build from the cohort's own
 percentiles and a local copy goes stale the first time the warehouse is rebuilt.
 
-**The SMS block is a preview, and sends nothing.** `SMS_MODE` defaults to
-`dry_run`; no provider is wired. Two reasons, both deliberate:
+**SMS defaults to dry run and sends nothing.** The composed text is always
+returned and shown in the UI, so what *would* be sent is visible whether or not
+sending is enabled.
 
-- Real paging belongs to `notification-gateway` downstream, which already routes
-  by severity and time of day. Sending from here would put a second copy of that
-  decision outside the pipeline.
-- Texting a real phone needs a provider account, credentials in env vars, and a
-  clinician who agreed to be contacted. A demo whose default path pages a real
-  person is a bug, not a feature.
+### Turning on live SMS
 
-To go live you would add a provider adapter behind `send_sms`, set
-`SMS_MODE=live` and `CLINICIAN_PHONE`, and keep credentials in the environment.
+Set these in your environment (never in the repo -- `detect-private-key` and the
+`.gitignore` are not a substitute for keeping credentials out of files):
+
+```bash
+export SMS_MODE=live
+export CLINICIAN_PHONE=+447700900123        # E.164, the phone that will ring
+export TWILIO_ACCOUNT_SID=AC...
+export TWILIO_AUTH_TOKEN=...
+export TWILIO_FROM_NUMBER=+15550001111
+```
+
+`sms.py` uses Twilio's REST API over `httpx` rather than the vendor SDK, so
+going live adds no dependency.
+
+**Four guards, each failing closed** (all covered by tests that assert a
+refusal, and the live-path test injects a fake transport so the suite can never
+contact a provider):
+
+1. `SMS_MODE` must be exactly `live`. Unset, `true`, `1`, `LIVE` -- all dry run.
+2. Every credential must be present, or you get a named error naming which.
+3. **The body must carry `[SYNTHETIC DRILL]`.** This module refuses to transmit
+   anything that could read as a real clinical alert to the person holding the
+   phone. That guard applies in dry run too, so a caller bug surfaces before
+   live sending is ever switched on.
+4. The destination must be E.164.
+
+The auth token is never logged and never appears in the result returned to the
+browser; a provider failure reports its status and a truncated body instead.
+
+Architecturally this is a demo shortcut and worth naming as one: in the real
+system `notification-gateway` owns paging and already routes by severity and
+time of day. This exists so a live drill can demonstrate the last hop.
 
 ## Verified
 
