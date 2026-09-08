@@ -44,7 +44,7 @@ deliverable 5 pass in substance but fail their acceptance tests exactly as writt
 | E5 recalibration | `capstone.news2` carries both `tier_ward` and `tier_icu`. Confirmed live: NEWS2=8 is `high` on ward, `medium` on ICU |
 | R6 (q4h dedup) | `dedup_key` buckets to `…T00:00:00` / `…T08:00:00`. Calendar buckets, with reasoning for why a rolling window would be wrong |
 | R1 (leakage guard) | Rows at `hour >= h_event` are **dropped**, not labelled 0. Windows anchored to hours-since-ICU-admission |
-| Grouped CV | `StratifiedGroupKFold` grouped on `subject_id` |
+| Grouped CV | `StratifiedGroupKFold` grouped on `subject_id` — **this row was wrong; see Appendix 4 (F6).** It was grouped on `stay_id`. The splitter's own module docstring said `subject_id`, so reading the code confirmed the claim instead of testing it |
 | ECG join | `merge_asof(direction="backward")`, 72h tolerance — past studies only, no future leakage |
 | Death attribution | Independently confirmed their bug fix: 20 flag-carrying stays → **15 real death events**. Their cited case (hadm 22942076) verified: first ICU stay ends 2111-11-14 00:14, death 2111-11-15 17:20 during the *second* stay |
 | Audit chain | Clean chain verifies; tampering row 3 detected at exactly `seq=3` |
@@ -428,3 +428,117 @@ applies.
 Trauma SICU's true performance is **unknown**, and this cohort cannot determine it: 453 at-risk
 rows, 17 positive rows, 8 composite events. That is the honest answer, and it differs from both
 "it is fine" and from the "worse than chance" this report originally asserted.
+
+---
+
+## Appendix 4 — a CV leak that predates every finding above (2026-09-08)
+
+Found while answering a different question: what would actually make the risk
+models more reliable, given a headline AUPRC whose 95% CI spans 0.32–0.64.
+`ml/evaluation/reliability.py` was written to measure the candidate levers
+rather than argue about them, and the first one it checked turned out to be a
+correctness bug that had been live for the whole project.
+
+### F6 — cross-validation grouped by stay, not by patient *(medium)* — **FIXED**
+
+`ml/models/splits.py` opened with "**Grouped by subject_id — no patient spans
+train and test**", and shipped a `group_key(groups, subject_ids)` helper to
+supply it. `ml/README.md` said the same. Nothing ever called that helper with a
+`subject_id`:
+
+- `ml/evaluation/run_all.py:132` passed `feature_matrix_for_training`'s
+  `groups`, which was `stay_id`.
+- `eval/prediction.py:90` called `group_key(groups)` with the optional second
+  argument omitted, so it returned `stay_id` unchanged.
+
+Three sources agreed on paper while the code did something else, and the helper
+is why nobody looked: an escape hatch that is never taken is worse than none,
+because it reads as a safeguard.
+
+**This cohort is exactly the wrong one for that mistake.** 21 of 93 subjects in
+the at-risk set have more than one ICU stay — `ml/features/labels.py`'s
+readmission events exist *because* of this — and those subjects carry **45.4% of
+at-risk rows and 53 of the 120 positives (44.2%)**. Nearly half the training
+signal came from patients able to sit in the training and test folds at once.
+
+**Measured cost**, same model, same folds, only the grouping unit differing:
+
+| Grouping | AUPRC | 95% CI |
+|---|---|---|
+| `stay_id` (what was reported) | 0.4479 | 0.330–0.616 |
+| `subject_id` (correct) | 0.3981 | 0.295–0.539 |
+
+**+0.0499 AUPRC of optimism.** It never threatened the headline claim —
+LightGBM still beats recalibrated NEWS2 in **20/20** repeats under the
+corrected grouping — but every cross-validated figure this project published
+was affected, and all of them were regenerated.
+
+That figure was **+0.0159** when first measured, before `gender` rejoined the
+feature set (below), and the growth is mechanism rather than noise: `gender` is
+constant within a patient, so under stay-grouping a repeat patient's
+sex-and-outcome pairing crosses between folds intact. **Adding a patient-level
+feature amplifies a patient-level leak** — worth knowing before adding another
+one, and a reason to treat the ablation that restored `gender` with more
+caution rather than less.
+
+**Fix:** `feature_matrix_for_training` returns `subject_id`; `group_key()` is
+deleted rather than fixed; `ml/tests/test_engineer.py` pins the grouping unit
+and asserts `subject_id` never reaches the feature matrix as a predictor.
+
+### Two consequences worth flagging
+
+> **Superseded on ECG (recorded, not rewritten).** Everything below about ECG
+> fusion was true when this review ran, and is left standing as the audit trail.
+> It has since been overtaken: ECG fusion was re-measured against the pruned
+> 67-feature set, lost decisively (**5 of 20** paired repeats, mean per-repeat
+> delta −0.015), and was **removed from the project entirely** — model, feature
+> pipeline, tests, dataset and PROJECT_PLAN finding E9. There is now one model
+> (`lightgbm`) and no variant sign test. The `gender`/F4 reversal below still
+> stands; only the sentences about which *variant* wins are obsolete, because
+> there is no longer more than one variant.
+
+
+**ECG fusion no longer earns its place at 6h.** Its AUPRC delta moved from
++0.014 to **−0.0004** under correct grouping, so the promoted model reverted
+from `lightgbm_ecg` to plain `lightgbm`. The 12h horizon already showed a loss;
+the 6h gain that justified promoting the ECG variant was substantially the leak.
+
+**F4 is reversed — `gender` is back in the model.** The same ablation that gave
+13/20 repeats under stay-grouping gives **15/20** under subject-grouping (AUPRC
+0.4715 vs 0.4612), which clears `fairness.EARN_THEIR_PLACE_FRACTION`'s 75% bar.
+
+Carrying the feature then changed which variant wins the primary horizon — ECG
+fusion moves from −0.0004 to **+0.0163** with `gender` present — so the promoted
+model is `lightgbm_ecg` again and the committed report's ablation, now run on
+that variant, reads **17/20** (0.4883 vs 0.4731). Note that this is a *different
+comparison*, not the 15/20 measurement improving; the decision was taken on
+15/20.
+
+The reversal was a deliberate decision, not an automatic one, and it is recorded
+here with its weaknesses attached: what moved was the *evaluation*, not any new
+evidence about the feature; 15/20 was exactly the threshold; and the +0.0103
+delta sits far inside a bootstrap CI many times wider. A criterion that flips on
+a grouping fix is a weak instrument, and `AblationResult.demographics_earn_their_place`
+now says so in its own docstring.
+
+The consequence is that **the subgroup fairness audit stops being a diagnostic
+and becomes load-bearing**: the model now uses the attribute it is audited on,
+so that table is the only thing between it and an unequal error distribution it
+is free to learn.
+
+### What this did *not* fix
+
+The confidence interval. `reliability.py` also tested the obvious modelling
+lever — 89 features against 120 positives is 1.35 events per variable, against a
+conventional floor of 10 — and **refuted it**: with features selected inside each
+training fold, AUPRC rises with the budget (0.235 at 5 features to 0.399 at the
+full set) and the across-repeat spread shows no trend. EPV is a
+degrees-of-freedom rule for linear models; a depth-4 LightGBM spends no parameter
+on a feature it does not split on.
+
+What remains is sample size, and the report sizes it: fitting
+`CI width = a·n^b` over subsampled patients gives **b = −0.37** (R² 0.868), not
+the textbook −0.50, so a 0.10-wide interval needs on the order of **725 positive
+subjects** against today's 49 — roughly 2.3× what assuming −0.50 would have
+claimed. See `ml/evaluation/reliability_report.md`, which is explicit that this
+is an extrapolation ~15× beyond its largest measured point.

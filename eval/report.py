@@ -142,7 +142,7 @@ def render_prediction_section(summary: dict, horizon: int) -> str:
     )
 
     calib_series = {}
-    for name in ("age_vitals_lr", "logistic_full", "lightgbm", "lightgbm_ecg"):
+    for name in ("age_vitals_lr", "logistic_full", "lightgbm"):
         if name not in summary:
             continue
         curve: pd.DataFrame = summary[name]["calibration"]
@@ -153,9 +153,9 @@ def render_prediction_section(summary: dict, horizon: int) -> str:
     )
 
     dca_series = {}
-    if "lightgbm_ecg" in summary and "decision_curve" in summary["lightgbm_ecg"]:
-        dc = summary["lightgbm_ecg"]["decision_curve"]
-        dca_series["lightgbm_ecg"] = list(zip(dc.threshold, dc.net_benefit_model, strict=True))
+    if "lightgbm" in summary and "decision_curve" in summary["lightgbm"]:
+        dc = summary["lightgbm"]["decision_curve"]
+        dca_series["lightgbm"] = list(zip(dc.threshold, dc.net_benefit_model, strict=True))
         dca_series["treat all"] = list(zip(dc.threshold, dc.net_benefit_treat_all, strict=True))
         dca_series["treat none"] = list(zip(dc.threshold, dc.net_benefit_treat_none, strict=True))
     dca_svg = _line_chart_svg(dca_series, x_label="threshold probability", y_label="net benefit")
@@ -184,7 +184,7 @@ def render_prediction_section(summary: dict, horizon: int) -> str:
     consumer assume the headline number applies everywhere. The AUROC/AUPRC on this
     page are cohort averages and do not show any of that.</div>
 
-    <h3>Decision-curve analysis (lightgbm_ecg)</h3>
+    <h3>Decision-curve analysis (lightgbm)</h3>
     <p class="muted">Net benefit of acting on the model at each threshold probability,
     against "treat everyone" and "treat no one". The model is only useful where its
     curve sits above both baselines.</p>

@@ -34,7 +34,7 @@ REPORT_PATH = OUTPUT_DIR / "report.html"
 REVIEW_SHEET_PATH = OUTPUT_DIR / "manual_review_sample.csv"
 
 BUDGETS = (0.05, 0.10, 0.20)
-BUDGET_MODELS = ("news2", "lightgbm", "lightgbm_ecg")
+BUDGET_MODELS = ("news2", "lightgbm")
 
 
 def run_prediction_axis(conn: duckdb.DuckDBPyConnection) -> tuple[str, dict]:

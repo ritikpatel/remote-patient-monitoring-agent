@@ -39,7 +39,6 @@ def test_collect_holdout_predictions_against_real_warehouse() -> None:
         "age_vitals_lr",
         "logistic_full",
         "lightgbm",
-        "lightgbm_ecg",
     }
     n = len(predictions["news2"].y_true)
     for pred in predictions.values():

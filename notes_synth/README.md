@@ -60,7 +60,7 @@ failure and moves on rather than losing the rest of the run).
 
 | | |
 |---|---|
-| Notes generated | 64 (discharge summaries, ICU nursing notes, ECG/radiology stubs — the latter two only where facts.py found grounding for them) |
+| Notes generated | 64 (discharge summaries, ICU nursing notes, radiology stubs — the latter two only where facts.py found grounding for them; ECG stubs are no longer produced, the dataset having been removed from the project) |
 | Total tokens | 156,756 |
 | Approx. cost | $0.043 (Groq pricing, approximate — see backends.py) |
 | Mean faithfulness | **1.000** — zero invalid citations across all 64 notes |

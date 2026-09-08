@@ -169,9 +169,12 @@ def add_lab_order_intensity(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
 
 
 def add_static_features(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    # subject_id is carried for grouping, not for modelling: it is the unit CV
+    # must split on (ml/models/splits.py), and it is never added to the feature
+    # column list below.
     static = conn.execute(
         """
-        select d.stay_id, d.admission_age, d.gender, i.first_careunit
+        select d.stay_id, d.subject_id, d.admission_age, d.gender, i.first_careunit
         from mimiciv_derived.icustay_detail d
         join mimiciv_icu.icustays i using (stay_id)
         """
@@ -179,25 +182,39 @@ def add_static_features(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
     return grid.merge(static, on="stay_id", how="left")
 
 
+# Columns still COMPUTED (add_severity_scores / add_lab_order_intensity keep
+# producing them) but no longer given to the learned models. `news2` and
+# `sofa_24hours` in particular must stay in the frame, because they are what
+# `ml/models/baselines.py` reads to score the NEWS2 and SOFA baselines --
+# `feature_matrix_for_training(..., include_severity_scores=True)` hands them
+# over for exactly that purpose and nothing else.
+SEVERITY_SCORE_COLUMNS = ["news2", "sofa_24hours"]
+LAB_INTENSITY_COLUMNS = ["lab_orders_4h", "lab_orders_24h", "lab_order_rate_ratio"]
+
+# Rolling statistics kept as features. The 4h/24h *means* were dropped: a
+# carried-forward raw value is already close to the recent mean, so the 18 mean
+# columns were largely a restatement of the 9 raw ones, and removing them was the
+# single largest measured gain of the feature-pruning study. Std and slope survive
+# because they carry variability and direction, which no raw value encodes.
+ROLLING_STATS = ("std", "slope")
+
 FEATURE_COLUMNS_BASE = [
     *CORE_VITALS,
     *[f"{v}_was_imputed" for v in CORE_VITALS],
     *[f"{v}_hours_since_last_obs" for v in CORE_VITALS],
-    "news2",
-    "sofa_24hours",
     "has_arterial_line",
-    "lab_orders_4h",
-    "lab_orders_24h",
-    "lab_order_rate_ratio",
     "admission_age",
 ]
 
 
-def rolling_feature_columns(windows: tuple[int, ...] = ROLLING_WINDOWS_H) -> list[str]:
+def rolling_feature_columns(
+    windows: tuple[int, ...] = ROLLING_WINDOWS_H,
+    stats: tuple[str, ...] = ROLLING_STATS,
+) -> list[str]:
     cols = []
     for w in windows:
         for var in CORE_VITALS:
-            cols += [f"{var}_{w}h_mean", f"{var}_{w}h_std", f"{var}_{w}h_slope"]
+            cols += [f"{var}_{w}h_{stat}" for stat in stats]
     return cols
 
 
@@ -219,36 +236,70 @@ def feature_matrix_for_training(
     features: pd.DataFrame,
     labels_df: pd.DataFrame,
     label_col: str,
-    include_ecg: pd.DataFrame | None = None,
-    include_demographics: bool = False,
+    include_demographics: bool = True,
+    include_severity_scores: bool = False,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Inner-join the full feature frame to the at-risk labelled rows, and
     return (X, y, groups) ready for ``models.splits``. ``groups`` is
-    ``stay_id`` -- grouped CV must never let one patient span train and test.
+    ``subject_id`` -- grouped CV must never let one patient span train and test.
 
-    ``include_demographics`` controls ``gender`` only, and defaults to **False**
-    (review finding F4). It used to be included unconditionally and ranked third by
-    mean |SHAP|, above most vitals. The association is real in this cohort -- 66.2% of
-    male stays reach a composite event against 42.9% of female, Fisher OR 2.62,
-    p=0.007 -- but a 20-repeat grouped-CV ablation showed it does not earn its place:
-    AUPRC 0.5065 with against 0.4953 without, a +0.011 delta inside a bootstrap CI
-    roughly twenty times that wide, winning in only 13 of 20 repeats. A feature that
-    performs like a coin flip and invites a fairness objection is not worth carrying;
-    the model that never saw it is the one that is easier to defend.
+    **This used to return ``stay_id``, and that was a leak.** ``models.splits``
+    has always documented subject-level grouping as the requirement, and shipped
+    a ``group_key()`` helper to supply it, but nothing ever called that helper
+    with a subject id -- so every cross-validated number this project produced
+    was grouped by stay. In this cohort that is not a technicality: 21 of 93
+    subjects in the at-risk set have more than one ICU stay, and they carry 45%
+    of the rows and 44% of the positives, so nearly half the signal came from
+    patients who could sit in the training and test folds at once.
+    ``ml/evaluation/reliability.py`` measures the cost at **+0.0499 AUPRC** of
+    optimism at the 6h horizon (it was +0.0159 before ``gender`` rejoined the
+    feature set -- a patient-constant feature makes a stay-level split leak
+    more). Returning the subject removes it.
 
-    ``ml/evaluation/fairness.py`` passes True to recover the subgroup labels it audits
-    on, then drops the column again before fitting -- one merge path, so the audited
-    rows and the modelled rows can never drift apart.
+    ``include_demographics`` controls ``gender`` only, and defaults to **True**.
+    That default has been both values, and the history matters more than the
+    current setting:
+
+    * Originally included unconditionally, where it ranked third by mean |SHAP|,
+      above most vitals, with no subgroup analysis anywhere in the project.
+    * Review finding **F4** dropped it. Under the then-current CV the 20-repeat
+      ablation gave AUPRC 0.5065 with against 0.4953 without, winning in only
+      13 of 20 repeats -- a coin flip, and not worth the fairness objection that
+      carrying a protected attribute invites.
+    * Correcting the CV grouping from ``stay_id`` to ``subject_id`` (see above)
+      moved that ablation to **15 of 20** repeats, 0.4715 against 0.4612, which
+      clears ``fairness.AblationResult.demographics_earn_their_place``'s 75%
+      bar. F4 is therefore **reversed** and the column is carried.
+    * That decision was taken when an ECG-fusion variant still existed and
+      `gender` changed which variant won the primary horizon. ECG has since
+      been removed from the project entirely (it measurably hurt, and a
+      post-discharge patient has no 12-lead ECG), so there is now one model and
+      that particular tie-break no longer arises. The 15/20 ablation result
+      above is the one the decision rests on; re-check it against the committed
+      report rather than any figure quoted from the two-variant era.
+
+    Read the reversal with the caution it deserves: the win count moved
+    13 -> 15 because the *evaluation* was corrected, not because new evidence
+    about the feature arrived, and 15/20 was exactly the threshold. The delta
+    (+0.0103) remains far inside a bootstrap CI roughly twenty-five times its
+    size. The association in this cohort is real -- 66.2% of male stays reach a
+    composite event against 42.9% of female (Fisher OR 2.62, p=0.007) -- but in
+    140 stays an effect that size is also what sampling noise looks like.
+    Because the model now *uses* the attribute it is audited on,
+    ``ml/evaluation/fairness.py``'s subgroup audit stops being a diagnostic and
+    becomes load-bearing.
+
+    ``ml/evaluation/fairness.py`` also passes False to run the without-gender
+    arm of the ablation -- one merge path, so the audited rows and the modelled
+    rows can never drift apart.
     """
     merged = labels_df[["stay_id", "hour", label_col]].merge(
         features, on=["stay_id", "hour"], how="inner"
     )
-    if include_ecg is not None:
-        merged = merged.merge(include_ecg, on=["stay_id", "hour"], how="left")
 
     cols = list(FEATURE_COLUMNS_BASE) + rolling_feature_columns()
-    if include_ecg is not None:
-        cols += [c for c in include_ecg.columns if c not in ("stay_id", "hour")]
+    if include_severity_scores:
+        cols = cols + list(SEVERITY_SCORE_COLUMNS)
 
     x = merged[cols].copy()
     if include_demographics:
@@ -258,5 +309,5 @@ def feature_matrix_for_training(
     # covariate in SAPS-II and APACHE, not a proxy.
     x["first_careunit"] = merged["first_careunit"]
     y = merged[label_col]
-    groups = merged["stay_id"]
+    groups = merged["subject_id"]
     return x, y, groups

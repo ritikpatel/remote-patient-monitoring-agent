@@ -39,14 +39,16 @@ def _synthetic_conn_for_static_features() -> duckdb.DuckDBPyConnection:
     conn.execute(
         """
         create table mimiciv_derived.icustay_detail as select * from (values
-            (1, 65, 'M', timestamp '2100-01-01 00:00:00')
-        ) as t(stay_id, admission_age, gender, icu_intime)
+            (1, 900, 65, 'M', timestamp '2100-01-01 00:00:00'),
+            (2, 900, 65, 'M', timestamp '2100-02-01 00:00:00')
+        ) as t(stay_id, subject_id, admission_age, gender, icu_intime)
         """
     )
     conn.execute(
         """
         create table mimiciv_icu.icustays as select * from (values
-            (1, 'Medical Intensive Care Unit')
+            (1, 'Medical Intensive Care Unit'),
+            (2, 'Medical Intensive Care Unit')
         ) as t(stay_id, first_careunit)
         """
     )
@@ -78,6 +80,64 @@ def test_static_features_join_age_gender_careunit() -> None:
     assert (out.admission_age == 65).all()
     assert (out.gender == "M").all()
     assert (out.first_careunit == "Medical Intensive Care Unit").all()
+
+
+def _feature_frame(stay_ids: list[int], subject_ids: list[int]) -> pd.DataFrame:
+    """A feature frame with every column `feature_matrix_for_training` selects.
+
+    Built from the module's own column lists rather than by running the real
+    builders, so the test exercises the grouping contract without needing a
+    warehouse -- and stays correct if a feature is added, because the column set
+    is read from `engineer`, not restated here.
+    """
+    n = len(stay_ids)
+    frame = pd.DataFrame(
+        {
+            "stay_id": stay_ids,
+            "subject_id": subject_ids,
+            "hour": list(range(n)),
+            "gender": ["M"] * n,
+            "first_careunit": ["Medical Intensive Care Unit"] * n,
+        }
+    )
+    for col in list(engineer.FEATURE_COLUMNS_BASE) + engineer.rolling_feature_columns():
+        if col not in frame.columns:
+            frame[col] = 1.0
+    return frame
+
+
+def test_feature_matrix_groups_by_subject_not_stay() -> None:
+    """The grouping unit CV splits on. Two stays of one patient must return the
+    SAME group, or that patient lands in train and test at once.
+
+    This is a regression test for a leak that was live for the whole project:
+    `groups` used to be `stay_id`, while `models/splits.py` documented
+    subject-level grouping and offered a `group_key()` helper that nothing ever
+    called with a subject id. In the demo cohort 21 of 93 at-risk subjects have
+    more than one stay, carrying 44% of the positives.
+    """
+    features = _feature_frame(stay_ids=[1, 1, 2, 2], subject_ids=[900, 900, 900, 900])
+    labels_df = pd.DataFrame(
+        {"stay_id": [1, 1, 2, 2], "hour": [0, 1, 0, 1], "label_6h": [0, 1, 0, 1]}
+    )
+
+    _x, _y, groups = engineer.feature_matrix_for_training(features, labels_df, "label_6h")
+
+    assert groups.nunique() == 1, "stays 1 and 2 belong to subject 900 and must share a group"
+    assert set(groups) == {900}
+
+
+def test_subject_id_is_a_grouping_key_not_a_feature() -> None:
+    """Carrying subject_id through the feature frame must not let it reach the
+    model -- a patient identifier is a perfect in-sample predictor and pure
+    leakage if it is ever fitted on.
+    """
+    features = _feature_frame(stay_ids=[1, 1], subject_ids=[900, 900])
+    labels_df = pd.DataFrame({"stay_id": [1, 1], "hour": [0, 1], "label_6h": [0, 1]})
+
+    x, _y, _groups = engineer.feature_matrix_for_training(features, labels_df, "label_6h")
+    assert "subject_id" not in x.columns
+    assert "stay_id" not in x.columns
 
 
 @pytest.mark.skipif(

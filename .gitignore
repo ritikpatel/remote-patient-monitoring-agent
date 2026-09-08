@@ -1,6 +1,5 @@
 # --- Raw data: never enters git (PhysioNet DUA — see docs/DATA_USE.md) ---
 /mimic-iv-clinical-database-demo-2.2/
-/mimic-iv-ecg-demo-diagnostic-electrocardiogram-matched-subset-demo-0.1/
 /wearable-device-dataset-from-induced-stress-and-structured-exercise-sessions-1.0.1/
 data/raw/
 data/interim/*
@@ -84,3 +83,7 @@ npm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+
+# Shareable data exports (patient-derived rows -- never into git, per docs/DATA_USE.md).
+# Regenerate with the scripts referenced in each workbook README sheet.
+exports/

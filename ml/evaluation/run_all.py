@@ -4,8 +4,8 @@ asserting the deterioration model beats recalibrated NEWS2 on AUPRC in >=15
 of 20 CV repeats).
 
 Pipeline: composite labels (``ml/features/labels.py``) -> feature frame
-(``ml/features/engineer.py``) -> optional ECG fusion (``ml/features/ecg.py``)
--> baselines and models under repeated grouped stratified CV
+(``ml/features/engineer.py``) -> baselines and models under repeated grouped
+stratified CV
 (``ml/models/*``) -> bootstrap CIs / calibration / Brier
 (``ml/evaluation/metrics.py``) -> SHAP attribution -> MLflow logging and
 model-registry promotion -> ``ml/evaluation/report.md``.
@@ -43,11 +43,10 @@ import pandas as pd  # noqa: E402
 import shap  # noqa: E402
 
 from ml.evaluation import fairness, metrics  # noqa: E402
-from ml.features import ecg, engineer, labels  # noqa: E402
+from ml.features import engineer, labels  # noqa: E402
 from ml.models import baselines, gbm, gru, logistic, splits  # noqa: E402
 
 WAREHOUSE_DB = REPO_ROOT / "warehouse" / "mimic4_demo.db"
-ECG_FEATURES_CACHE = REPO_ROOT / "data" / "processed" / "ecg_features.parquet"
 PROMOTED_MODEL_DIR = REPO_ROOT / "ml" / "models" / "promoted"
 REPORT_PATH = REPO_ROOT / "ml" / "evaluation" / "report.md"
 # A local sqlite file by default (no infra required); Phase 8's real dockerized
@@ -69,37 +68,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # --------------------------------------------------------------------------
 # Data assembly
 # --------------------------------------------------------------------------
-
-
-def get_or_build_ecg_features(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    if ECG_FEATURES_CACHE.exists():
-        return pd.read_parquet(ECG_FEATURES_CACHE)
-    subs = set(
-        conn.execute("select distinct subject_id from mimiciv_derived.icustay_detail")
-        .fetchdf()
-        .subject_id
-    )
-    record_list = ecg.load_record_list(cohort_subject_ids=subs)
-    feats, n_failed = ecg.build_ecg_feature_table(record_list)
-    print(
-        f"ECG feature extraction: {len(feats)} succeeded, {n_failed} failed of {len(record_list)}"
-    )
-    ECG_FEATURES_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    feats.to_parquet(ECG_FEATURES_CACHE, index=False)
-    return feats
-
-
-def attach_ecg(
-    keyed_rows: pd.DataFrame, ecg_features: pd.DataFrame, conn: duckdb.DuckDBPyConnection
-) -> pd.DataFrame:
-    intime = conn.execute(
-        "select stay_id, subject_id, icu_intime from mimiciv_derived.icustay_detail"
-    ).fetchdf()
-    merged = keyed_rows[["stay_id", "hour"]].merge(intime, on="stay_id")
-    merged["row_abs_time"] = merged.icu_intime + pd.to_timedelta(merged.hour, unit="h")
-    return ecg.attach_nearest_ecg(
-        merged[["stay_id", "hour", "subject_id", "row_abs_time"]], ecg_features
-    )
 
 
 # --------------------------------------------------------------------------
@@ -195,7 +163,7 @@ def gbm_fit_predict(x_train: pd.DataFrame, y_train: pd.Series, x_test: pd.DataFr
 # AUROC/AUPRC are rank-based and still meaningful, but Brier score and a
 # calibration curve are only defined for a value in [0, 1] representing an
 # actual probability, which these deliberately are not.
-PROBABILISTIC_MODELS = {"age_vitals_lr", "logistic_full", "lightgbm", "lightgbm_ecg", "gru"}
+PROBABILISTIC_MODELS = {"age_vitals_lr", "logistic_full", "lightgbm", "gru"}
 
 
 def summarize_model(
@@ -237,7 +205,6 @@ def main() -> int:
     conn = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
     grid = conn.execute("select stay_id, hour from capstone.hourly_grid").fetchdf()
     features = engineer.build_feature_frame(conn)
-    ecg_features = get_or_build_ecg_features(conn)
     raw_grid = engineer.load_hourly_grid_raw(conn)
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -259,22 +226,26 @@ def main() -> int:
             f"({summary_row.prevalence:.1%}), positive stays={summary_row.positive_stays}"
         )
 
-        ecg_attached = attach_ecg(features, ecg_features, conn)
-        x_no_ecg, y, groups = engineer.feature_matrix_for_training(features, lab, label_col)
-        x_ecg, _, _ = engineer.feature_matrix_for_training(
-            features, lab, label_col, include_ecg=ecg_attached
+        x_model, y, groups = engineer.feature_matrix_for_training(features, lab, label_col)
+        # NEWS2 and SOFA are no longer model features (the pruning study measured
+        # them at zero contribution, and SOFA's cardiovascular component encodes
+        # vasopressor administration, which is one of the labels). They are still
+        # the two baselines every learned model must beat, so they get their own
+        # matrix -- same rows, same order, severity columns re-attached -- which
+        # only `news2_fit_predict` and `sofa_fit_predict` ever see.
+        x_baselines, _, _ = engineer.feature_matrix_for_training(
+            features, lab, label_col, include_severity_scores=True
         )
 
         results_this_horizon: dict[
             str, tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame | None]
         ] = {}
         for name, fit_fn, x in [
-            ("news2", news2_fit_predict, x_no_ecg),
-            ("sofa", sofa_fit_predict, x_no_ecg),
-            ("age_vitals_lr", age_vitals_fit_predict, x_no_ecg),
-            ("logistic_full", logistic_fit_predict, x_no_ecg),
-            ("lightgbm", gbm_fit_predict, x_no_ecg),
-            ("lightgbm_ecg", gbm_fit_predict, x_ecg),
+            ("news2", news2_fit_predict, x_baselines),
+            ("sofa", sofa_fit_predict, x_baselines),
+            ("age_vitals_lr", age_vitals_fit_predict, x_model),
+            ("logistic_full", logistic_fit_predict, x_model),
+            ("lightgbm", gbm_fit_predict, x_model),
         ]:
             fold_results, oof_true, oof_score, oof_groups = run_cv_for_model(
                 name, fit_fn, x, y, groups, n_repeats=n_repeats
@@ -372,7 +343,7 @@ def main() -> int:
         combined_fold_results = pd.concat(
             [results_this_horizon[m][0] for m in results_this_horizon], ignore_index=True
         )
-        for model_name in ["logistic_full", "lightgbm", "lightgbm_ecg"]:
+        for model_name in ["logistic_full", "lightgbm"]:
             wins, total = metrics.beats_baseline_in_n_of_k_repeats(
                 combined_fold_results, model_name, "news2", metric="auprc"
             )
@@ -380,26 +351,20 @@ def main() -> int:
             if horizon == PRIMARY_HORIZON and model_name == "lightgbm":
                 primary_wins, primary_total = wins, total
 
-        # ECG delta.
-        def _auprc_for(model_name: str, horizon: int = horizon) -> float:
-            return next(
-                s for s in all_summaries if s["model"] == model_name and s["horizon"] == horizon
-            )["auprc_point"]
-
-        ecg_delta_auprc = _auprc_for("lightgbm_ecg") - _auprc_for("lightgbm")
-        print(f"  ECG fusion delta on AUPRC: {ecg_delta_auprc:+.4f}")
-
         report_sections.append(
             {
                 "horizon": horizon,
                 "label_summary": summary_row,
-                "ecg_delta_auprc": ecg_delta_auprc,
                 "results": results_this_horizon,
             }
         )
 
         if horizon == PRIMARY_HORIZON:
-            best_variant = "lightgbm_ecg" if ecg_delta_auprc > 0 else "lightgbm"
+            # One model, chosen by design rather than by a sign test on a noisy
+            # point estimate. ECG fusion was removed from this project entirely:
+            # it measurably hurt (5/20 paired repeats, mean per-repeat delta
+            # -0.015), and a post-discharge patient has no 12-lead ECG anyway.
+            best_variant = "lightgbm"
             best_summary = next(
                 s for s in all_summaries if s["model"] == best_variant and s["horizon"] == horizon
             )
@@ -418,23 +383,35 @@ def main() -> int:
             # same folds with the column added back, so the comparison is
             # like-for-like with the headline number rather than a separate run.
             print("\n  Fairness audit (F4)...")
-            x_demo, y_demo, groups_demo = engineer.feature_matrix_for_training(
+            # The arms are the other way round from how this audit was first
+            # written. `gender` is now a production feature (F4 reversed once the
+            # CV grouping was corrected -- see engineer.feature_matrix_for_training),
+            # so the main run is the *with* arm and the ablation refits *without*
+            # it on the same folds. Comparing the main run against itself, which is
+            # what leaving this untouched would have done, would have reported a
+            # delta of exactly zero and looked entirely plausible.
+            x_nodemo, y_nodemo, groups_nodemo = engineer.feature_matrix_for_training(
                 features,
                 lab,
                 label_col,
-                include_ecg=ecg_attached if "ecg" in best_variant else None,
-                include_demographics=True,
+                include_demographics=False,
             )
-            fold_with, _, _, _ = run_cv_for_model(
-                f"{best_variant}+gender",
+            fold_without, _, _, _ = run_cv_for_model(
+                f"{best_variant}-gender",
                 gbm_fit_predict,
-                x_demo,
-                y_demo,
-                groups_demo,
+                x_nodemo,
+                y_nodemo,
+                groups_nodemo,
                 n_repeats=n_repeats,
             )
-            fold_without = results_this_horizon[best_variant][0]
+            fold_with = results_this_horizon[best_variant][0]
             ablation = fairness.run_ablation(fold_with, fold_without)
+            x_demo = results_this_horizon[best_variant][4]
+            # The GRU entry stores None here -- it trains on raw sequences, not
+            # this matrix -- and the promoted variant is never the GRU. Assert
+            # rather than assume, so a future change to `best_variant` fails
+            # loudly instead of silently auditing fairness on nothing.
+            assert x_demo is not None, f"{best_variant} has no feature matrix to audit"
             print(
                 f"    gender ablation: AUPRC {ablation.with_demographics_auprc:.4f} with vs "
                 f"{ablation.without_demographics_auprc:.4f} without "
@@ -468,13 +445,11 @@ def main() -> int:
     assert promoted_candidate is not None
     best_name, best_auprc = promoted_candidate
     lab_primary = labels.build_labels(conn, grid, horizons=(PRIMARY_HORIZON,))
-    ecg_attached = attach_ecg(features, ecg_features, conn)
-    include_ecg = ecg_attached if "ecg" in best_name else None
     # No CV here -- this is the one final refit on everything, so the group
     # labels feature_matrix_for_training returns (for grouped splitting) have
     # nothing to do.
     x_final, y_final, _groups_final = engineer.feature_matrix_for_training(
-        features, lab_primary, f"label_{PRIMARY_HORIZON}h", include_ecg=include_ecg
+        features, lab_primary, f"label_{PRIMARY_HORIZON}h"
     )
     final_model, _ = gbm.fit_predict_proba(x_final, y_final, x_final)
     x_final_cat = gbm._as_categorical(x_final)
@@ -573,8 +548,6 @@ def write_report(
             f"{int(s.total_hours)}\n"
             f"- Positives: {int(s.positive_hours)} ({s.prevalence:.1%}), across "
             f"{int(s.positive_stays)} distinct stays\n"
-            f"- ECG-fusion delta on AUPRC (with ECG - without): "
-            f"{section['ecg_delta_auprc']:+.4f}\n"
         )
         table = summary_df[summary_df.horizon == h].drop(columns=["horizon"])
         lines.append(table.to_markdown(index=False, floatfmt=".4f"))
@@ -594,22 +567,43 @@ def write_report(
             f"**Ablation** (same model, same folds, {ab.n_repeats} repeats): AUPRC "
             f"**{ab.with_demographics_auprc:.4f}** with `gender` against "
             f"**{ab.without_demographics_auprc:.4f}** without "
-            f"({ab.delta:+.4f}), winning in only "
-            f"**{ab.repeats_where_with_is_better}/{ab.n_repeats}** repeats.\n"
+            f"({ab.delta:+.4f}), winning in "
+            f"**{ab.repeats_where_with_is_better}/{ab.n_repeats}** repeats "
+            f"(the bar is {fairness.EARN_THEIR_PLACE_FRACTION:.0%}).\n"
         )
-        lines.append(
-            f"Decision: **{'kept' if ab.demographics_earn_their_place else 'dropped'}**. "
-            + (
-                ""
-                if ab.demographics_earn_their_place
-                else "A delta this far inside the bootstrap CI, winning barely more often "
-                "than a coin flip, does not justify carrying a protected attribute into "
-                "a clinical model. `gender` is excluded from the feature set "
-                "(`engineer.feature_matrix_for_training(include_demographics=False)`, the "
-                "default); age and first care unit are kept, being a validated severity "
+        if ab.demographics_earn_their_place:
+            lines.append(
+                "Decision: **kept**, reversing F4. Two things must be said plainly "
+                "alongside that.\n\n"
+                "First, **what moved was the evaluation, not the evidence.** F4 measured "
+                "13/20 under CV grouped by `stay_id`. Correcting the grouping to "
+                "`subject_id` (see `ml/evaluation/reliability_report.md`) moved that "
+                "comparison to **15/20** -- exactly the bar -- and that is the number the "
+                "reversal was decided on. The "
+                f"{ab.repeats_where_with_is_better}/{ab.n_repeats} above is a *further* "
+                "comparison, run on the variant that carrying `gender` made the winner; it "
+                "is not the 15/20 measurement improving. No new information about `gender` "
+                "arrived at any point in that sequence. A criterion that crosses its own "
+                "threshold because a grouping bug was fixed is a weak instrument, and the "
+                f"delta ({ab.delta:+.4f}) is far inside a bootstrap CI many times its "
+                "size.\n\n"
+                "Second, **the subgroup audit below is now load-bearing rather than "
+                "diagnostic.** The model uses the attribute it is audited on, so the "
+                "table is no longer a check that a protected characteristic stayed out "
+                "of the model -- it is the only thing standing between the model and an "
+                "unequal distribution of errors it is now free to learn. `age` and "
+                "`first_careunit` remain on their own footing: a validated severity "
                 "covariate and clinical context respectively, not proxies.\n"
             )
-        )
+        else:
+            lines.append(
+                "Decision: **dropped**. A delta this far inside the bootstrap CI, winning "
+                "barely more often than a coin flip, does not justify carrying a protected "
+                "attribute into a clinical model. `gender` is excluded from the feature set "
+                "(`engineer.feature_matrix_for_training(include_demographics=False)`); age "
+                "and first care unit are kept, being a validated severity covariate and "
+                "clinical context respectively, not proxies.\n"
+            )
         lines.append(
             f"\n**Subgroup performance** at a single shared alert threshold "
             f"(top decile of scores, p={fairness_result['threshold']:.3f}). One "

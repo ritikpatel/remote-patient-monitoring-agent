@@ -33,7 +33,7 @@ import numpy as np
 import pandas as pd
 import shap
 
-from ml.features import ecg, engineer
+from ml.features import engineer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROMOTED_MODEL_DIR = REPO_ROOT / "ml" / "models" / "promoted"
@@ -90,46 +90,6 @@ def _feature_row(
     if row.empty:
         raise UnknownStayHour(f"no hourly_grid row for stay_id={stay_id} hour={hour}")
 
-    ecg_columns = [c for c in feature_columns if c.startswith("ecg_")]
-    if ecg_columns:
-        ecg_cache = REPO_ROOT / "data" / "processed" / "ecg_features.parquet"
-        raw_ecg_dataset_present = ecg.DEFAULT_RECORD_LIST.exists()
-        if ecg_cache.exists() or raw_ecg_dataset_present:
-            if ecg_cache.exists():
-                ecg_features = pd.read_parquet(ecg_cache)
-            else:
-                subs = {
-                    int(s)
-                    for s in conn.execute(
-                        "select distinct subject_id from mimiciv_derived.icustay_detail"
-                    ).fetchdf()["subject_id"]
-                }
-                ecg_features = ecg.build_ecg_feature_table(
-                    ecg.load_record_list(cohort_subject_ids=subs)
-                )[0]
-            intime = conn.execute(
-                "select stay_id, subject_id, icu_intime from mimiciv_derived.icustay_detail"
-                " where stay_id = ?",
-                [stay_id],
-            ).fetchdf()
-            keyed = intime.copy()
-            keyed["hour"] = hour
-            keyed["row_abs_time"] = keyed.icu_intime + pd.to_timedelta(hour, unit="h")
-            attached = ecg.attach_nearest_ecg(
-                keyed[["stay_id", "hour", "subject_id", "row_abs_time"]], ecg_features
-            )
-            row = row.merge(attached, on=["stay_id", "hour"], how="left")
-        else:
-            # Neither the ECG feature cache nor the raw waveform dataset is
-            # present in this deployment (e.g. a container image, which
-            # deliberately never bundles the multi-hundred-MB raw ECG
-            # corpus). Rather than fail the whole request, leave the ECG
-            # columns missing -- LightGBM's native NaN handling (R2/R3) is
-            # exactly the mechanism for "this signal wasn't available."
-            for col in ecg_columns:
-                row = row.copy()
-                row[col] = float("nan")
-
     return row[feature_columns]
 
 
@@ -172,8 +132,11 @@ def score_one(conn: duckdb.DuckDBPyConnection, stay_id: int, hour: int) -> dict:
     feature_columns = manifest["feature_columns"]
     x = _feature_row(conn, stay_id, hour, feature_columns).copy()
     # Tolerate a manifest listing a column the model no longer uses: the promoted
-    # feature set can change (finding F4 dropped `gender`), and a stale entry here
-    # should not crash serving.
+    # feature set does change between runs, and a stale entry here should not
+    # crash serving. `gender` has now been on both sides of this -- dropped by
+    # finding F4, restored when F6's CV-grouping fix moved its ablation back over
+    # the bar -- which is exactly why this loop follows the frame rather than a
+    # hardcoded column list.
     for col in manifest["categorical_columns"]:
         if col in x.columns:
             x[col] = x[col].astype("category")

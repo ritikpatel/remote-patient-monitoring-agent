@@ -27,9 +27,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import ml  # noqa: E402,F401 -- sets KMP_DUPLICATE_LIB_OK/OMP_NUM_THREADS as a side effect
 from ml.evaluation import metrics  # noqa: E402
-from ml.features import ecg, engineer, labels  # noqa: E402
+from ml.features import engineer, labels  # noqa: E402
 from ml.models import baselines, gbm, logistic  # noqa: E402
-from ml.models.splits import group_key  # noqa: E402
 from sklearn.model_selection import StratifiedGroupKFold  # noqa: E402
 
 PRIMARY_HORIZON = 6
@@ -60,44 +59,27 @@ def collect_holdout_predictions(
     lab = labels.build_labels(conn, grid, horizons=(horizon,))
     features = engineer.build_feature_frame(conn)
 
-    subs = {
-        int(s)
-        for s in conn.execute(
-            "select distinct subject_id from mimiciv_derived.icustay_detail"
-        ).fetchdf()["subject_id"]
-    }
-    ecg_cache = REPO_ROOT / "data" / "processed" / "ecg_features.parquet"
-    if ecg_cache.exists():
-        ecg_features = pd.read_parquet(ecg_cache)
-    else:
-        record_list = ecg.load_record_list(cohort_subject_ids=subs)
-        ecg_features, _ = ecg.build_ecg_feature_table(record_list)
-    intime = conn.execute(
-        "select stay_id, subject_id, icu_intime from mimiciv_derived.icustay_detail"
-    ).fetchdf()
-    keyed = features[["stay_id", "hour"]].merge(intime, on="stay_id")
-    keyed["row_abs_time"] = keyed.icu_intime + pd.to_timedelta(keyed.hour, unit="h")
-    ecg_attached = ecg.attach_nearest_ecg(
-        keyed[["stay_id", "hour", "subject_id", "row_abs_time"]], ecg_features
-    )
-
     label_col = f"label_{horizon}h"
     x, y, groups = engineer.feature_matrix_for_training(features, lab, label_col)
-    x_ecg, _, _ = engineer.feature_matrix_for_training(
-        features, lab, label_col, include_ecg=ecg_attached
+    # news2/sofa are baselines, not features -- they need their own matrix now
+    # that the learned models no longer carry those columns.
+    x_baselines, _, _ = engineer.feature_matrix_for_training(
+        features, lab, label_col, include_severity_scores=True
     )
 
-    train_idx, test_idx = _one_holdout_split(y, group_key(groups))
+    # `groups` is subject_id (engineer.feature_matrix_for_training) -- this used to
+    # route through splits.group_key(), which silently returned stay_id.
+    train_idx, test_idx = _one_holdout_split(y, groups)
     y_test = y.iloc[test_idx].to_numpy()
     groups_test = groups.iloc[test_idx].to_numpy()
 
     results: dict[str, ModelPredictions] = {}
 
     results["news2"] = ModelPredictions(
-        "news2", y_test, baselines.news2_score(x.iloc[test_idx]), groups_test
+        "news2", y_test, baselines.news2_score(x_baselines.iloc[test_idx]), groups_test
     )
     results["sofa"] = ModelPredictions(
-        "sofa", y_test, baselines.sofa_score(x.iloc[test_idx]), groups_test
+        "sofa", y_test, baselines.sofa_score(x_baselines.iloc[test_idx]), groups_test
     )
 
     age_vitals_pipe = baselines.build_age_vitals_logistic_regression()
@@ -116,11 +98,6 @@ def collect_holdout_predictions(
 
     _model, proba = gbm.fit_predict_proba(x.iloc[train_idx], y.iloc[train_idx], x.iloc[test_idx])
     results["lightgbm"] = ModelPredictions("lightgbm", y_test, proba, groups_test)
-
-    _model, proba = gbm.fit_predict_proba(
-        x_ecg.iloc[train_idx], y.iloc[train_idx], x_ecg.iloc[test_idx]
-    )
-    results["lightgbm_ecg"] = ModelPredictions("lightgbm_ecg", y_test, proba, groups_test)
 
     return results
 
@@ -174,7 +151,7 @@ def summarize_prediction_axis(
             "auprc": ci["auprc"],
             "calibration": calibration,
         }
-        if name in ("age_vitals_lr", "logistic_full", "lightgbm", "lightgbm_ecg"):
+        if name in ("age_vitals_lr", "logistic_full", "lightgbm"):
             entry["brier"] = metrics.brier(pred.y_true, pred.y_score)
             entry["decision_curve"] = decision_curve(pred.y_true, pred.y_score)
         summary[name] = entry

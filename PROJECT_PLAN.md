@@ -46,7 +46,7 @@ Every design rule in this plan derives from one of these.
 | E6 | Labels are scarce | 20 ICU deaths, 53 readmissions, 52 vasopressor stays | Methodology carries credibility, not headline metrics |
 | E7 | All six SOFA organ systems computable | Vasopressors 52, vent 66, urine 137 stays, labs 100% | `mimic-code` concept SQL is reusable |
 | E8 | Sepsis-3 reachable | 121 admissions have both an antibiotic order and a culture | Sepsis pathway viable |
-| E9 | ECG links to the clinical cohort | 92/100 patients, 12-lead 500 Hz, 10 s | Genuine multimodal fusion; but episodic, and **unlabelled** (no `machine_measurements`) |
+| E9 | ~~ECG links to the clinical cohort~~ **(retired)** | 92/100 patients, 12-lead 500 Hz, 10 s | Fusion was built and measured, then **removed from the project**: it hurt the model (5/20 paired repeats, mean per-repeat delta −0.015) and a post-discharge patient has no 12-lead ECG. Dataset deleted; see `ml/evaluation/feature_pruning_report.md` |
 | E10 | Wearables are healthy volunteers | Median age ~21 vs ICU median 63; no patient link | Transport/DSP testbed only. Deterioration scenarios require documented morphing |
 | E11 | No `note` module | Confirmed in dataset README | Synthetic narrative required |
 | E12 | Admission burst is an **ordering** burst | Transfers 7.5×, orders 2.9×, but ICU monitoring only 1.31×; peak 33.7 ev/pt/hr vs 18.2 baseline | Simulator needs per-family arrival models. Size load tests at 33.7, not the mean |
@@ -116,7 +116,7 @@ capstone-rpm/
 ├── data/{raw,interim,processed}/      # raw gitignored; symlinks to the three dataset folders
 ├── notebooks/01_capstone_eda.ipynb    # the completed EDA (already built)
 ├── warehouse/                         # DuckDB build + mimic-code concepts + hourly grid
-├── simulators/                        # icu_replay, wearable_replay, morphing, arrival_models
+├── simulators/                        # real_event_replay, wearable_replay, morphing, arrival_models
 ├── notes_synth/                       # LLM note generation + fact ledger
 ├── ml/{features,models,evaluation}/
 ├── services/                          # 9 FastAPI microservices
@@ -180,7 +180,7 @@ survive the demo subset.
    a projection, not a translation.
 2. `simulators/arrival_models.py` — **per-family inter-arrival distributions fitted in EDA §6** (**R5**).
    Bursty for orders/transfers, near-stationary with a 4-hourly comb for monitoring.
-3. `simulators/icu_replay.py` — replays `hourly_grid` at configurable time compression (1 h → 1 s), using
+3. `simulators/real_event_replay.py` — replays `hourly_grid` at configurable time compression (1 h → 1 s), using
    the arrival models rather than a uniform tick.
 4. `simulators/wearable_replay.py` — true-rate Empatica streaming (BVP 64 Hz, ACC 32 Hz, EDA/TEMP 4 Hz,
    HR 1 Hz). Honour `data_constraints.txt`: `f07` PPG/temp invalid, `S02` duplicated blocks, and
@@ -199,7 +199,7 @@ survive the demo subset.
 **Goal:** unblock RAG summarisation, and get evaluation ground truth as a by-product.
 
 `notes_synth/generate.py` uses `claude-sonnet-5` to expand structured facts into discharge summaries,
-daily nursing progress notes, and ECG/radiology report stubs.
+daily nursing progress notes, and radiology report stubs.
 
 **The critical design point: emit a fact ledger alongside every note.** Each generated sentence carries
 the `(table, row_id, value)` tuples it derives from, written to `notes_synth/fact_ledger.parquet`. Real
@@ -265,9 +265,10 @@ Given n=140, methodology carries the credibility:
   age + last HR/RR/SpO2. If gradient boosting does not beat NEWS2, report that as the result.
 - Models: L2 logistic regression → LightGBM → small GRU over the 24 h window. Stop at whichever wins; no
   transformer at this n.
-- **ECG fusion:** derive per-study features (rate, QRS duration, QTc, rhythm class) with `neurokit2` —
-  necessary because the demo has no `machine_measurements` labels (**E9**). Join on `subject_id` + nearest
-  `ecg_time`; report the delta with and without.
+- ~~**ECG fusion**~~ — **dropped (E9 retired).** Built as planned (`neurokit2` per-study features, joined
+  on `subject_id` + nearest preceding `ecg_time`) and measured honestly: it *lost* AUPRC, winning only
+  5 of 20 paired CV repeats. Removed from the model, the pipeline and the repository rather than kept as
+  an unused option, because the target deployment is post-discharge monitoring where no 12-lead ECG exists.
 - SHAP attribution surfaced through `risk-engine` so every alert carries a reason.
 - All runs logged to MLflow; the promoted model is a registry artefact, not a pickle in a folder.
 
@@ -342,7 +343,7 @@ Assert the deterioration model beats recalibrated NEWS2 on AUPRC in ≥15 of 20 
 
 ```bash
 docker compose -f infra/compose/docker-compose.yml up -d
-python simulators/icu_replay.py --stay-id <a stay reaching NEWS2>=7> --compress 3600
+python simulators/real_event_replay.py --stay-id <a stay reaching NEWS2>=7> --compress 3600
 ```
 An alert appears in the dashboard and a push notification fires. Confirm the payload carries a SHAP reason
 and a RAG passage with a traceable ledger ID.
