@@ -227,6 +227,16 @@ sizes a data pull to an order of magnitude, and does not promise a number.
 That sizing is what `warehouse/build_duckdb.py --cohort-subjects N` exists to
 load; see [`warehouse/README.md`](../warehouse/README.md).
 
+## Channel dropout (`ml/evaluation/channel_dropout.py`)
+
+What the *deployed* model does when a sensor is missing, masked at prediction
+time rather than retrained. The realistic post-discharge channel set retains
+**68%** of AUPRC; masking to HR+SpO2 retains 55% (0.274) — statistically the
+same as a model trained only on those channels (0.269), which is the evidence
+that one generic model beats maintaining a second wrist-specific one. See
+[`evaluation/channel_dropout_report.md`](evaluation/channel_dropout_report.md),
+including why these are upper bounds.
+
 ## Secondary, underpowered outcomes (`ml/evaluation/secondary_whole_stay.py`)
 
 ICU mortality and 30-day readmission, exactly as the plan requires: reported

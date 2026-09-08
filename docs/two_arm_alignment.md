@@ -110,6 +110,30 @@ same 75th/90th-percentile recalibration `warehouse/news2.py` already performs fo
 the ICU, run over HR+SpO2-only scores — instead of inheriting seven-vital
 cut-points. Keeps one method, two calibrations.
 
+### A2. One model, not two — *settled by measurement*
+
+`channel_dropout.py` answers the architecture question this document opened
+with. Take the promoted model, train it once on everything, then mask channels
+**at prediction time only**:
+
+| masked | AUPRC | retained |
+|---|---|---|
+| nothing (baseline) | 0.502 | 100% |
+| realistic post-discharge (core temp, GCS, FiO2, arterial line) | 0.340 | 68% |
+| everything but HR + SpO2 | 0.274 | 55% |
+
+Masking down to wrist channels scores **0.274**, against **0.269** for a model
+*separately trained* on those channels. They are the same number. **A second
+wrist-specific model is not worth deploying** — one generic model that degrades
+gracefully covers the same ground, which is the architecture to build toward.
+`wrist_only.py`'s role is now to characterise the loss, not to ship an artefact.
+
+The honest caveat is in the report: every channel is 74–100% present in
+training, so the trees had little chance to learn a good default for absence.
+These numbers measure training-time availability as much as clinical value, and
+a model meant to run with channels routinely missing should be **trained** that
+way, not only measured that way.
+
 ### B. Route on care setting — *medium, fixes the root cause*
 
 1. Add `CareSetting` (`icu` | `post_discharge`) to the Observation contract,

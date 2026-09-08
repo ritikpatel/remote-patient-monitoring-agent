@@ -132,6 +132,13 @@ def main() -> int:
     features = engineer.build_feature_frame(conn)
     label_col = f"label_{args.horizon}h"
     x_full, y, groups = engineer.feature_matrix_for_training(features, lab, label_col)
+    # NEWS2 is a baseline here, not a feature: the pruning study removed it from
+    # the model's matrix, so the baseline needs its own severity-bearing copy --
+    # same rows, same order. Without this the run dies with KeyError('news2')
+    # after printing four models, which is exactly how it went unnoticed once.
+    x_baselines, _, _ = engineer.feature_matrix_for_training(
+        features, lab, label_col, include_severity_scores=True
+    )
     conn.close()
 
     for name, cols in (("WRIST_STRICT", WRIST_STRICT), ("WRIST_CONSUMER", WRIST_CONSUMER)):
@@ -152,7 +159,7 @@ def main() -> int:
         ("wrist_consumer", gbm_fit_predict, x_full[WRIST_CONSUMER]),
         ("wrist_strict", gbm_fit_predict, x_full[WRIST_STRICT]),
         ("wrist_hr_rule", hr_rule_fit_predict, x_full[WRIST_STRICT]),
-        ("news2_hospital", news2_fit_predict, x_full),
+        ("news2_hospital", news2_fit_predict, x_baselines),
     ]
 
     all_folds, summaries = [], []

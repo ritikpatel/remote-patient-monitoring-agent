@@ -10,22 +10,22 @@ Composite deterioration within 6h, grouped repeated stratified CV (20 repeats x 
 
 | model | features | obtainable from | AUPRC (95% CI) | AUROC (95% CI) |
 |---|---|---|---|---|
-| ICU full (LightGBM) | 90 | hospital only | 0.398 (0.296-0.540) | 0.826 (0.738-0.909) |
-| Wrist, consumer class (HR+SpO2) | 19 | Apple Watch / Fitbit | 0.231 (0.154-0.369) | 0.749 (0.641-0.867) |
-| Wrist, strict class (HR only) | 10 | Empatica E4 | 0.158 (0.099-0.274) | 0.707 (0.599-0.818) |
+| ICU full (LightGBM) | 67 | hospital only | 0.493 (0.376-0.632) | 0.823 (0.727-0.917) |
+| Wrist, consumer class (HR+SpO2) | 15 | Apple Watch / Fitbit | 0.269 (0.186-0.394) | 0.754 (0.658-0.858) |
+| Wrist, strict class (HR only) | 8 | Empatica E4 | 0.204 (0.124-0.356) | 0.717 (0.618-0.822) |
 | Wrist HR rule (untrained) | 1 | any wearable | 0.113 (0.050-0.240) | 0.667 (0.546-0.769) |
 | NEWS2 (hospital reference) | 7 vitals | hospital only | 0.095 (0.049-0.187) | 0.673 (0.582-0.756) |
 
 
 ## What this says
 
-**A wrist-shaped keyhole retains roughly 58% of the full model's AUPRC** (0.231 against 0.398) while using 19 features instead of 90. The ICU model beats it in 20 of 20 repeats, so the gap is consistent, not noise.
+**A wrist-shaped keyhole retains roughly 55% of the full model's AUPRC** (0.269 against 0.493) while using 15 features instead of 67. The ICU model beats it in 20 of 20 repeats, so the gap is consistent, not noise.
 
-**SpO2 is the sensor that matters.** Consumer class beats strict HR-only class in 20 of 20 repeats (0.231 vs 0.158 AUPRC). If a device is being chosen for the post-discharge arm, this is the specification that changes the answer -- and it is exactly the channel the Empatica E4 in this project does not have (which is why `simulators/morphing.py` has to fabricate SpO2 outright rather than morph it from a real recording).
+**SpO2 is the sensor that matters.** Consumer class beats strict HR-only class in 20 of 20 repeats (0.269 vs 0.204 AUPRC). If a device is being chosen for the post-discharge arm, this is the specification that changes the answer -- and it is exactly the channel the Empatica E4 in this project does not have (which is why `simulators/morphing.py` has to fabricate SpO2 outright rather than morph it from a real recording).
 
-**A two-channel wrist beats the seven-vital ward standard.** The consumer wrist model scores 0.231 AUPRC against hospital NEWS2's 0.095, winning 20 of 20 repeats -- on a task NEWS2 was built for and with five of its seven parameters unavailable. Read it carefully, though: this compares a *trained* model against an *untrained* ordinal score that was never fitted to this cohort, so it measures the value of fitting, not the inferiority of NEWS2's clinical design. The fair conclusion is narrower and still useful -- a wearable-obtainable feature set is not the reason a post-discharge arm would under-perform.
+**A two-channel wrist beats the seven-vital ward standard.** The consumer wrist model scores 0.269 AUPRC against hospital NEWS2's 0.095, winning 20 of 20 repeats -- on a task NEWS2 was built for and with five of its seven parameters unavailable. Read it carefully, though: this compares a *trained* model against an *untrained* ordinal score that was never fitted to this cohort, so it measures the value of fitting, not the inferiority of NEWS2's clinical design. The fair conclusion is narrower and still useful -- a wearable-obtainable feature set is not the reason a post-discharge arm would under-perform.
 
-**The learned model earns its complexity.** It beats the untrained 'high heart rate = risk' rule in 20 of 20 repeats (0.231 vs 0.113), so the result is not simply tachycardia correlating with badness.
+**The learned model earns its complexity.** It beats the untrained 'high heart rate = risk' rule in 20 of 20 repeats (0.269 vs 0.113), so the result is not simply tachycardia correlating with badness.
 
 ## What it does not say
 
