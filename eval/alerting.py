@@ -27,39 +27,66 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from ml.features import labels  # noqa: E402
 from services.common.testing import load_module  # noqa: E402
+from warehouse.news2 import escalation_reason, should_escalate  # noqa: E402
 
 _alert_store_module = load_module(
     REPO_ROOT / "services" / "alert-service" / "store.py", "eval_alert_service_store"
 )
 AlertStore = _alert_store_module.AlertStore
 
-ALERT_TYPE = "news2_high"
+# Covers both of NEWS2's escalation limbs since finding F1, not just the aggregate
+# tier -- named for the decision, not for one of its two causes.
+ALERT_TYPE = "news2_escalation"
 FALSE_ALARM_HORIZON_H = 12  # matches ml/features/labels.py's secondary horizon
 
 
 def simulate_alert_history(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    """Replays every ICU-recalibrated-high hour across the whole cohort
-    through the real AlertStore, in chronological (wall-clock) order, and
-    returns one row per RAISED alert record (i.e. already deduped/escalated
-    by the real production logic) with its real timestamp and patient_ref.
+    """Replays every ESCALATING hour across the whole cohort through the real
+    AlertStore, in chronological (wall-clock) order, and returns one row per RAISED
+    alert record (i.e. already deduped/escalated by the real production logic) with
+    its real timestamp and patient_ref.
+
+    "Escalating" is ``warehouse.news2.should_escalate`` -- the same predicate
+    agent-orchestrator's EscalationDecider applies, imported rather than restated, so
+    this replay cannot measure a rule the running system does not use. Before finding
+    F1 this selected ``tier_icu = 'high'`` alone, which measured only one of NEWS2's
+    two escalation triggers.
     """
     rows = conn.execute(
         """
-        select n.stay_id, n.hour, d.icu_intime
+        select n.stay_id, n.hour, n.tier_icu, n.max_component_nongcs, n.red_params,
+               n.gcs_drop, d.icu_intime
         from capstone.news2 n
         join mimiciv_derived.icustay_detail d using (stay_id)
-        where n.tier_icu = 'high'
         """
     ).fetchdf()
+    rows = rows[
+        [
+            should_escalate(t, m, d)
+            for t, m, d in zip(rows.tier_icu, rows.max_component_nongcs, rows.gcs_drop, strict=True)
+        ]
+    ]
     rows["abs_time"] = rows.icu_intime + pd.to_timedelta(rows.hour, unit="h")
     rows = rows.sort_values("abs_time")
+    # Built here from typed Series rather than inside the loop: itertuples erases
+    # column dtypes, so per-row extraction cannot be typed without casting each field.
+    rows["reason"] = [
+        escalation_reason(t, m, r, d)
+        for t, m, r, d in zip(
+            rows.tier_icu, rows.max_component_nongcs, rows.red_params, rows.gcs_drop, strict=True
+        )
+    ]
 
     store = AlertStore(":memory:")
     history = []
     for row in rows.itertuples(index=False):
         patient_ref = f"ICUStay/{row.stay_id}"
         alert, was_new = store.raise_alert(
-            patient_ref, ALERT_TYPE, "high", "NEWS2 ICU-recalibrated tier high", row.abs_time
+            patient_ref,
+            ALERT_TYPE,
+            "high",
+            row.reason,
+            row.abs_time,
         )
         if was_new:
             # A repeat within the same 4h bucket bumps repeat_count/escalates

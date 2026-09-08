@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from services.common.audit import AuditLog  # noqa: E402
 from services.common.testing import load_service_app  # noqa: E402
+from warehouse.news2 import should_escalate  # noqa: E402
 
 _rag_module = load_service_app("rag-service", REPO_ROOT)
 _agent_module = load_service_app("agent-orchestrator", REPO_ROOT)
@@ -230,10 +231,23 @@ def run_corpus(
 
 
 def escalation_agreement(results: list[dict]) -> AgreementResult:
+    """Does the agent's escalate flag match the deterministic policy it claims to obey?
+
+    The reference is ``warehouse.news2.should_escalate`` -- imported, not restated.
+    This function previously inlined ``tier == "high"``, which was a *second* copy of
+    the rule; when finding F1 added NEWS2's single-parameter limb to the policy node,
+    this metric silently began reporting 67% agreement for an agent that was in fact
+    obeying its policy perfectly. A hand-copied reference implementation measures
+    drift between two copies of a rule, not agent fidelity.
+    """
     n_agree = 0
     for state in results:
-        tier = state.get("risk_score", {}).get("news2_tier_icu")
-        expected = tier == "high"
+        risk = state.get("risk_score", {})
+        expected = should_escalate(
+            risk.get("news2_tier_icu"),
+            risk.get("max_component_nongcs"),
+            risk.get("gcs_drop", False),
+        )
         n_agree += int(state.get("escalate") == expected)
     return AgreementResult(n=len(results), n_agree=n_agree)
 

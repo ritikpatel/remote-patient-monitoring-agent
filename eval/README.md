@@ -83,18 +83,52 @@ comfortably under PROJECT_PLAN.md section 15's 2-second bar. See
 `eval/output/report.html` for the exact numbers from the run that produced
 it.
 
-## Alerting axis: a real finding, not a bug
+## Alerting axis: one real finding, and one real bug
 
 Coverage (the fraction of true composite-deterioration events preceded by
-any alert at all) came out low (~15%) in the real replay. This is not a
-simulation bug: Phase 5 already found that most patients in this cohort
+any alert at all) came out low -- **15.4%** -- in the first real replay. That
+turned out to have two separate causes, and it is worth keeping both on the
+record because only one of them was a genuine limit of the data.
+
+**The real finding.** Phase 5 already found that most patients in this cohort
 need vasopressor/ventilator support within 1-3h of ICU admission, often
-*before* their NEWS2 has climbed to the "high" tier at all. The raw
-NEWS2-high alerting rule genuinely has limited lead time for the specific
-events this system targets -- which is the real operational argument for
-Phase 5's learned model (its sensitivity-at-a-fixed-alert-budget numbers, in
-the same report section, are markedly better), not merely a cross-validation
-metric improvement.
+*before* an hourly monitoring cadence can accumulate enough signal for any
+score to climb. No alerting rule recovers those events; this is the real
+operational argument for Phase 5's learned model (its sensitivity-at-a-fixed-
+alert-budget numbers, in the same report section, are markedly better), not
+merely a cross-validation metric improvement.
+
+**The real bug (review finding F1).** The escalation rule was also only half
+of NEWS2. RCP 2017 defines two independent triggers -- the aggregate score
+*and* "a score of 3 in any single parameter" -- and the implementation tiered
+on the aggregate alone, silently discarding the component subscores it had
+already computed. The rule now has three limbs: aggregate tier, any red
+non-GCS parameter, and a **falling GCS off sedation**. Coverage rises from
+15.4% to **41.0%**, while alerting on less of the cohort than the
+ward-standard rule does:
+
+| Rule | Event coverage | Median lead | Patient-hours alerted |
+|---|---|---|---|
+| aggregate tier only (before F1) | 15.4% | 0.75h | 12.8% |
+| + single red non-GCS parameter | 41.0% | 0.49h | 31.8% |
+| **+ GCS drop off sedation (current)** | **41.0%** | 0.63h | 32.9% |
+| + red GCS *level* when not sedated (rejected) | 47.4% | 0.48h | 51.1% |
+| strict RCP, all parameters (rejected) | 55.1% | 0.39h | 71.5% |
+| ward-standard aggregate (reference) | 39.7% | 0.48h | 48.8% |
+
+The GCS-drop limb adds no event coverage on this metric and costs ~1pp of
+alert burden, and was adopted anyway: without it the patient who *exposed* the
+bug -- stay 34617352, GCS 7 -> 3 off sedation, dead two days later -- is still
+not escalated, because GCS was their only red parameter. A rule that simply
+ignores GCS leaves that death as unflagged as the original bug did. The
+78-event metric counts first composite events, and neurological deterioration
+is not one of its components, so the metric cannot see what that limb buys.
+
+`simulate_alert_history` and `escalation_agreement` both now import
+`warehouse.news2.should_escalate` rather than restating the rule. The
+hand-copied reference implementation in `escalation_agreement` is exactly how
+this stayed invisible: it compared the agent against a second copy of the old
+rule, so both were wrong in the same direction and agreement read 100%.
 
 ## RAG/agent axis: what "faithfulness" and "manual review" mean here
 

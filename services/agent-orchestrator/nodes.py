@@ -32,10 +32,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from services.common.audit import AuditLogProtocol  # noqa: E402
 from state import AgentState  # noqa: E402
+from warehouse.news2 import escalation_reason, should_escalate  # noqa: E402
 
-# The ICU-recalibrated tier that escalates regardless of any LLM opinion (E5: the
-# ward-standard threshold is not discriminating for an ICU population; this is the
-# same tier warehouse/news2.py computes and risk-engine serves).
+# The escalation predicate is NOT redefined here. NEWS2 has two independent triggers
+# -- the ICU-recalibrated aggregate tier (E5) and RCP 2017's single-parameter red flag
+# (finding F1) -- and both are defined once in warehouse/news2.py so this policy node,
+# eval/alerting.py's replay, and risk-engine's response can never drift apart. An
+# earlier version of this node inlined `tier == "high"`, which silently dropped the
+# second trigger; see warehouse/news2.py's module docstring for the case that found it
+# and the measurement that chose the replacement.
 ESCALATE_ON_TIER = "high"
 
 
@@ -176,13 +181,12 @@ def escalation_decider(deps: Dependencies) -> NodeFn:
     def run(state: AgentState) -> dict:
         risk = state.get("risk_score", {})
         tier = risk.get("news2_tier_icu")
+        max_nongcs = risk.get("max_component_nongcs")
+        red_params = ",".join(risk.get("red_params") or [])
+        gcs_drop = risk.get("gcs_drop", False)
         # POLICY FIRST: escalate is decided here, before the LLM is ever consulted.
-        escalate = tier == ESCALATE_ON_TIER
-        reason = (
-            f"ICU-recalibrated NEWS2 tier is '{tier}' (>= {ESCALATE_ON_TIER} threshold)"
-            if escalate
-            else f"ICU-recalibrated NEWS2 tier is '{tier}', below the {ESCALATE_ON_TIER} threshold"
-        )
+        escalate = should_escalate(tier, max_nongcs, gcs_drop)
+        reason = escalation_reason(tier, max_nongcs, red_params, gcs_drop)
 
         advisory = None
         model_id = None
@@ -204,7 +208,7 @@ def escalation_decider(deps: Dependencies) -> NodeFn:
             "escalate": escalate,
             "escalation_reason": reason,
             "llm_advisory": advisory,
-            "_tool_calls": ["risk_score (policy input only)"]
+            "_tool_calls": ["risk_score (policy input only)", "news2.should_escalate"]
             + (["llm.advisory"] if deps.llm else []),
             "_model_id": model_id,
             "_tokens": tokens,

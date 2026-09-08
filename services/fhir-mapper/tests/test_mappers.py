@@ -1,3 +1,4 @@
+import copy
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -199,3 +200,96 @@ def test_device_and_diagnostic_report_and_communication_build():
 def test_procedure_accepts_date_not_just_datetime():
     proc = procedure_to_fhir(1, 1, "0210", 10, "CABG", date(2110, 1, 2), 1)
     assert proc.performedDateTime is not None
+
+
+# --- Review finding F2: identity and references on publish -------------------
+# A plain POST let HAPI assign its own id, so Patient/10006053 became Patient/2 and
+# every resource referencing it was rejected with HAPI-1094. These pin the conditional
+# -update / conditional-reference behaviour that replaced it.
+
+from hapi_client import (  # noqa: E402
+    IDENTIFIER_SYSTEMS,
+    build_transaction_bundle,
+    conditional_url,
+    rewrite_reference,
+    rewrite_references,
+)
+
+
+def test_conditional_url_keys_on_the_business_identifier_not_a_server_id():
+    patient = {
+        "resourceType": "Patient",
+        "id": "10006053",
+        "identifier": [{"system": "urn:mimic-iv:subject_id", "value": "10006053"}],
+    }
+    assert conditional_url(patient) == "Patient?identifier=urn:mimic-iv:subject_id|10006053"
+
+
+def test_conditional_url_is_none_for_types_without_a_business_identifier():
+    """Leaf resources nothing references are created, not conditionally updated."""
+    assert conditional_url({"resourceType": "Observation"}) is None
+
+
+def test_references_are_rewritten_to_conditional_form():
+    assert (
+        rewrite_reference("Patient/10006053")
+        == "Patient?identifier=urn:mimic-iv:subject_id|10006053"
+    )
+    assert (
+        rewrite_reference("Encounter/22942076")
+        == "Encounter?identifier=urn:mimic-iv:hadm_id|22942076"
+    )
+
+
+def test_non_fhir_reference_strings_are_left_alone():
+    """observation_to_fhir legitimately carries ICUStay/... and Subject/... (see its
+    docstring). Rewriting those would invent a mapping that does not exist."""
+    for ref in ("ICUStay/34547401", "Subject/S05", "Observation/34617352"):
+        assert rewrite_reference(ref) == ref
+
+
+def test_already_conditional_references_are_not_double_rewritten():
+    ref = "Patient?identifier=urn:mimic-iv:subject_id|10006053"
+    assert rewrite_reference(ref) == ref
+
+
+def test_rewrite_references_recurses_and_does_not_mutate_the_caller():
+    original = {
+        "resourceType": "MedicationAdministration",
+        "subject": {"reference": "Patient/10039708"},
+        "context": {"reference": "Encounter/28258130"},
+        "partOf": [{"reference": "Patient/10039708"}],
+    }
+    before = copy.deepcopy(original)
+    out = rewrite_references(original)
+    assert original == before, "the caller's resource was mutated"
+    assert out["subject"]["reference"].startswith("Patient?identifier=")
+    assert out["context"]["reference"].startswith("Encounter?identifier=")
+    assert out["partOf"][0]["reference"].startswith("Patient?identifier=")
+
+
+def test_transaction_bundle_strips_client_ids_and_picks_the_right_verb():
+    """HAPI-0960: a client may not assign a purely numeric id, so a conditional update
+    must not carry one. Identity comes from the identifier, not the id."""
+    patient = {
+        "resourceType": "Patient",
+        "id": "10006053",
+        "identifier": [{"system": "urn:mimic-iv:subject_id", "value": "10006053"}],
+    }
+    observation = {"resourceType": "Observation", "status": "final"}
+    bundle = build_transaction_bundle([patient, observation])
+
+    assert bundle["type"] == "transaction"
+    pat_entry, obs_entry = bundle["entry"]
+    assert "id" not in pat_entry["resource"]
+    assert pat_entry["request"] == {
+        "method": "PUT",
+        "url": "Patient?identifier=urn:mimic-iv:subject_id|10006053",
+    }
+    assert obs_entry["request"] == {"method": "POST", "url": "Observation"}
+
+
+def test_every_referenced_type_has_an_identifier_system():
+    """Guard: if a mapper starts referencing a new resource type, that type needs an
+    entry in IDENTIFIER_SYSTEMS or its references silently stop resolving again."""
+    assert {"Patient", "Encounter"} <= set(IDENTIFIER_SYSTEMS)

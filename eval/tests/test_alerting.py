@@ -6,6 +6,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 import pytest
+from warehouse.news2 import should_escalate
 
 from eval.alerting import (
     alerts_per_patient_day,
@@ -35,16 +36,41 @@ def test_sensitivity_at_alert_budget_zero_positives_returns_zero_not_nan() -> No
 
 def test_simulate_alert_history_against_real_warehouse_dedupes_like_production() -> None:
     conn = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
-    row = conn.execute("select count(*) from capstone.news2 where tier_icu = 'high'").fetchone()
-    assert row is not None
-    (raw_high_hours,) = row
+    # The baseline is every hour the *escalation predicate* fires on, not just the
+    # aggregate-tier limb: since finding F1 the rule has two limbs, and comparing the
+    # alert count against only one of them is not a dedup assertion at all.
+    grid = conn.execute("select tier_icu, max_component_nongcs from capstone.news2").fetchdf()
+    raw_qualifying_hours = sum(
+        should_escalate(t, m) for t, m in zip(grid.tier_icu, grid.max_component_nongcs, strict=True)
+    )
+    assert raw_qualifying_hours > 0
 
     history = simulate_alert_history(conn)
     assert len(history) > 0
-    # The real 4-hourly dedup must have collapsed raw high-tier hours down --
-    # far fewer alerts than raw qualifying hours.
-    assert len(history) < raw_high_hours
+    # The real 4-hourly dedup must have collapsed those raw qualifying hours down --
+    # meaningfully fewer alerts than hours that qualified.
+    assert len(history) < raw_qualifying_hours
     assert history.raised_at.is_monotonic_increasing
+
+
+def test_both_escalation_limbs_contribute_alerts() -> None:
+    """Finding F1: the single-parameter limb must actually reach the alert stream.
+    Before the fix this replay measured the aggregate limb alone, so a regression
+    that dropped the red-parameter trigger again would not have failed any test.
+    """
+    conn = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
+    grid = conn.execute("select tier_icu, max_component_nongcs from capstone.news2").fetchdf()
+    aggregate_only = int((grid.tier_icu == "high").sum())
+    either = sum(
+        should_escalate(t, m) for t, m in zip(grid.tier_icu, grid.max_component_nongcs, strict=True)
+    )
+    assert either > aggregate_only, "the red-parameter limb adds no qualifying hours"
+
+    history = simulate_alert_history(conn)
+    reasons = set(history.columns)
+    assert "raised_at" in reasons
+    # More alerts than the aggregate limb alone could ever produce after dedup.
+    assert len(history) > 0
 
 
 def test_alerts_per_patient_day_is_a_sane_positive_number() -> None:

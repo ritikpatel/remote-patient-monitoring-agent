@@ -24,7 +24,11 @@ from fastapi import Body, FastAPI, HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from hapi_client import HapiValidationError, post_resource  # noqa: E402
+from hapi_client import (  # noqa: E402
+    HapiValidationError,
+    post_resource,
+    publish_resources,
+)
 from mappers import (  # noqa: E402
     condition_to_fhir,
     device_to_fhir,
@@ -62,17 +66,25 @@ def health() -> dict:
 
 
 @app.post("/fhir/_publish")
-def publish_to_hapi(resource: dict = Body(...)) -> dict:
-    """Takes any resource this service already mapped (the JSON any /fhir/*
-    route above returns, unchanged) and actually POSTs it to a live HAPI FHIR
-    server -- the real create-and-validate round trip, not the local
-    fhir.resources/Pydantic construction mappers.py already does. A real 503,
-    not a fabricated pass, when no HAPI is configured.
+def publish_to_hapi(payload: dict | list = Body(...)) -> dict | list:
+    """Takes any resource this service already mapped (the JSON any /fhir/* route
+    above returns, unchanged) and publishes it to a live HAPI FHIR server -- the real
+    persist-and-validate round trip, not the local fhir.resources/Pydantic
+    construction mappers.py already does. A real 503, not a fabricated pass, when no
+    HAPI is configured.
+
+    Accepts either a single resource or a **list** of resources. A list is published
+    as one FHIR transaction, so a resource and the resources it references land
+    together and the references resolve (review finding F2 -- publishing an Encounter
+    on its own still fails, correctly, if its Patient was never published: FHIR will
+    not let you reference what does not exist).
     """
     if not HAPI_FHIR_BASE_URL:
         raise HTTPException(503, "HAPI_FHIR_BASE_URL not configured -- Phase 8 infra not running")
     try:
-        return post_resource(resource, HAPI_FHIR_BASE_URL)
+        if isinstance(payload, list):
+            return publish_resources(payload, HAPI_FHIR_BASE_URL)
+        return post_resource(payload, HAPI_FHIR_BASE_URL)
     except HapiValidationError as exc:
         raise HTTPException(502, str(exc)) from exc
 

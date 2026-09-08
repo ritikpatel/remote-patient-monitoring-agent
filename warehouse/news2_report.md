@@ -36,3 +36,24 @@ everyone here is already sick enough to be in the ICU. The ICU-recalibrated cut-
 instead flag the 25% of this cohort's own
 patient-hours with the highest NEWS2, i.e. relative deterioration within an ICU
 population rather than absolute deterioration relative to a ward population.
+
+## Single-parameter escalation (finding F1)
+
+NEWS2 (RCP 2017) has two independent escalation triggers, not one. Alongside the
+aggregate tier above, **a score of 3 in any single parameter**
+mandates urgent review on its own. `capstone.news2` now stores `max_component`,
+`max_component_nongcs` and `red_params` so both limbs are computable, and
+`should_escalate()` is the single definition every consumer imports.
+
+| Limb | Patient-hours |
+|---|---|
+| ICU-recalibrated aggregate tier == high | 1,535 |
+| Any non-GCS parameter scoring 3 | 3,435 |
+| GCS falling >= 2 points off sedation | 255 |
+| **Any of the three (the escalation predicate)** | **3,948 (32.9%)** |
+
+GCS enters as a *change*, not a level. A red GCS level alone accounts for
+4,633 further patient-hours -- overwhelmingly sedated patients -- and
+escalating on it fires on 71.5% of the cohort. A GCS *drop* off sedation is specific
+enough to cost roughly one extra percentage point of alert burden. See the module
+docstring for the measurement of every variant against the 78 composite events.

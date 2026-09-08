@@ -47,8 +47,20 @@ from fhir.resources.R4B.riskassessment import RiskAssessment, RiskAssessmentPred
 from services.contracts.observation import Observation as OurObservation  # noqa: E402
 
 
+def _code_token(value: str) -> str:
+    """FHIR's `code` primitive forbids leading/trailing whitespace and any run of
+    consecutive whitespace (regex ``^[^\s]+(\s[^\s]+)*$``). Several of the free-text
+    MIMIC values used as codes violate it -- the EMAR drug name
+    "Sodium Chloride 0.9%  Flush" carries a double space and made every
+    MedicationAdministration for that admission fail Pydantic construction with a
+    500, found while verifying review finding F2's publish path. The human-readable
+    original is preserved verbatim in ``display``; only the code token is normalised.
+    """
+    return " ".join(value.split())
+
+
 def _cc(system: str, code: str, display: str) -> CodeableConcept:
-    return CodeableConcept(coding=[Coding(system=system, code=code, display=display)])
+    return CodeableConcept(coding=[Coding(system=system, code=_code_token(code), display=display)])
 
 
 def _ref(reference: str) -> Reference:

@@ -47,6 +47,16 @@ class RiskScoreResponse(BaseModel):
     news2_tier_icu: str | None
     sofa_24h: int | None
     reason: list[str]
+    # Finding F1: NEWS2's single-parameter limb. These are *facts*, not a decision --
+    # the escalation policy itself stays in agent-orchestrator's EscalationDecider
+    # (PROJECT_PLAN.md section 10). `escalation_recommended` is included because the
+    # predicate is shared code (warehouse.news2.should_escalate), so exposing it here
+    # cannot drift from what the policy node computes.
+    max_component: int | None = None
+    max_component_nongcs: int | None = None
+    red_params: list[str] = []
+    gcs_drop: bool = False
+    escalation_recommended: bool = False
 
 
 @app.get("/health")
@@ -59,19 +69,37 @@ def score(stay_id: int, hour: int) -> RiskScoreResponse:
     conn = get_conn()
     try:
         news2_row = conn.execute(
-            "SELECT news2, tier_ward, tier_icu, hr, rr, spo2, sbp, temp_c, gcs_total, fio2 "
+            "SELECT news2, tier_ward, tier_icu, hr, rr, spo2, sbp, temp_c, gcs_total, fio2, "
+            "max_component, max_component_nongcs, red_params, gcs_drop "
             "FROM capstone.news2 WHERE stay_id = ? AND hour = ?",
             [stay_id, hour],
         ).fetchone()
         if news2_row is None:
             raise HTTPException(404, f"no hourly_grid/news2 row for stay_id={stay_id} hour={hour}")
-        news2, tier_ward, tier_icu, hr, rr, spo2, sbp, temp_c, gcs_total, fio2 = news2_row
+        (
+            news2,
+            tier_ward,
+            tier_icu,
+            hr,
+            rr,
+            spo2,
+            sbp,
+            temp_c,
+            gcs_total,
+            fio2,
+            max_component,
+            max_component_nongcs,
+            red_params,
+            gcs_drop,
+        ) = news2_row
 
         sofa_row = conn.execute(
             "SELECT sofa_24hours FROM mimiciv_derived.sofa WHERE stay_id = ? AND hr = ?",
             [stay_id, hour],
         ).fetchone()
         sofa_24h = sofa_row[0] if sofa_row else None
+
+        from warehouse.news2 import should_escalate
 
         reason = _explain(hr, rr, spo2, sbp, temp_c, gcs_total, fio2)
         return RiskScoreResponse(
@@ -82,6 +110,11 @@ def score(stay_id: int, hour: int) -> RiskScoreResponse:
             news2_tier_icu=tier_icu,
             sofa_24h=sofa_24h,
             reason=reason,
+            max_component=max_component,
+            max_component_nongcs=max_component_nongcs,
+            red_params=[p for p in (red_params or "").split(",") if p],
+            gcs_drop=bool(gcs_drop),
+            escalation_recommended=should_escalate(tier_icu, max_component_nongcs, gcs_drop),
         )
     finally:
         conn.close()

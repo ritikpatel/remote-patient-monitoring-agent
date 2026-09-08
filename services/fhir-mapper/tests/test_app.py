@@ -130,4 +130,51 @@ def test_publish_patient_against_a_real_hapi_fhir_server(real_ids, monkeypatch):
     stored = resp.json()
     assert stored["resourceType"] == "Patient"
     assert "id" in stored
-    assert stored["meta"]["versionId"] == "1"
+    # Not `== "1"`: publishing is a conditional update since finding F2, so a resource
+    # already present from an earlier run is matched and versioned up rather than
+    # duplicated. That idempotence is the fix; asserting version 1 would assert an
+    # empty server, which is no longer required.
+    assert stored["meta"]["versionId"].isdigit()
+
+
+@pytest.mark.skipif(
+    not _hapi_reachable(),
+    reason="no HAPI FHIR server reachable at localhost:8090 -- see infra/compose/README.md",
+)
+def test_publish_resolves_references_across_a_transaction(real_ids, monkeypatch):
+    """Review finding F2, end to end against a real server.
+
+    Publishing an Encounter used to fail with
+    ``HAPI-1094: Resource Patient/<subject_id> not found, specified in path:
+    Encounter.subject`` because the Patient had been POSTed and given a server id.
+    Published as one transaction with conditional references, the Encounter's subject
+    must now resolve to whatever id HAPI actually assigned the Patient.
+    """
+    monkeypatch.setattr(_module, "HAPI_FHIR_BASE_URL", HAPI_BASE_URL)
+    hadm_id, subject_id = real_ids
+    patient = client.get(f"/fhir/Patient/{subject_id}").json()
+    encounter = client.get(f"/fhir/Encounter/{hadm_id}").json()
+
+    resp = client.post("/fhir/_publish", json=[patient, encounter])
+    assert resp.status_code == 200, resp.text
+    stored_patient, stored_encounter = resp.json()
+
+    assert stored_encounter["resourceType"] == "Encounter"
+    # The reference points at the id HAPI assigned, not the MIMIC subject_id.
+    assert stored_encounter["subject"]["reference"] == f"Patient/{stored_patient['id']}"
+
+
+@pytest.mark.skipif(
+    not _hapi_reachable(),
+    reason="no HAPI FHIR server reachable at localhost:8090 -- see infra/compose/README.md",
+)
+def test_publishing_the_same_resource_twice_is_idempotent(real_ids, monkeypatch):
+    """Conditional update keys on the business identifier, so a republish must match
+    the existing resource rather than creating a second copy of the same patient."""
+    monkeypatch.setattr(_module, "HAPI_FHIR_BASE_URL", HAPI_BASE_URL)
+    _, subject_id = real_ids
+    resource = client.get(f"/fhir/Patient/{subject_id}").json()
+
+    first = client.post("/fhir/_publish", json=resource).json()
+    second = client.post("/fhir/_publish", json=resource).json()
+    assert first["id"] == second["id"]

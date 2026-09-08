@@ -7,6 +7,44 @@ can be used as an alert trigger -- 79% of ICU stays trip the ward "medium" thres
 at some point, which is not clinically discriminating within a population that is, by
 definition, already critically ill.
 
+NEWS2's SECOND escalation trigger (added after review finding F1). RCP 2017 defines
+two independent triggers, not one: the aggregate score *and* "a score of 3 in any
+single parameter", which mandates urgent review regardless of the total. An earlier
+version of this module computed the component subscores and then discarded them,
+tiering on the aggregate alone -- a silent deviation from the standard this module
+claims to implement. A real case: stay 34617352 hour 35 (GCS 3, the deepest possible
+coma, with SOFA-24h 12) scored NEWS2 8, which is 'medium' on the ICU-recalibrated
+cut-point, and did not escalate. That patient died.
+
+The strict rule cannot be applied as written in an ICU, though: GCS 3 is routine in
+sedated patients, so scoring it red fires on 71.5% of all patient-hours. Variants were
+measured against all 78 composite deterioration events (coverage / share of
+patient-hours alerted / efficiency = coverage per unit alert burden):
+
+    aggregate only (previous behaviour)        15.4%  / 12.8%  -> 1.20
+    + red non-GCS parameter                    41.0%  / 31.8%  -> 1.29
+    + red non-GCS + GCS DROP off sedation      41.0%  / 32.9%  -> 1.25   ADOPTED
+    + red non-GCS + red GCS level not sedated  47.4%  / 51.1%  -> 0.93
+    strict RCP, all parameters                 55.1%  / 71.5%  -> 0.77
+    (ward-standard aggregate, reference)       39.7%  / 48.8%  -> 0.81
+
+Every variant here beats the ward-standard reference. The adopted rule is not the
+most efficient by a hair -- dropping the GCS limb scores 1.29 against its 1.25 -- and
+that trade was made deliberately, because *the efficient variant does not catch the
+patient who exposed the bug*. Stay 34617352's only red parameter was GCS, so a rule
+that simply ignores GCS leaves that death exactly as unflagged as the original bug
+did. What distinguishes that patient from a sedated one is the trajectory: GCS 7 for
+six hours, then 3, with no sedative running. Escalating on a GCS *drop* rather than a
+GCS *level* costs about one extra percentage point of alert burden, catches that case
+and every case like it, and is the clinically defensible answer -- "we ignore GCS" is
+not something to tell a clinician when a falling GCS is the textbook deterioration
+sign. Coverage of the 78-event metric is unchanged because those stays were already
+covered by another limb; the metric counts first composite events, and neurological
+deterioration is not one of its components.
+
+`max_component` (all seven parameters, GCS included) is stored regardless, so the
+level-vs-trajectory decision stays reviewable in the data rather than only in prose.
+
 What is NOT recalibrated: the component scoring itself (respiratory rate, SpO2, SBP,
 heart rate, temperature, consciousness, supplemental O2) is the validated NEWS2
 formula and is left untouched -- ward-derived component thresholds are a clinical
@@ -31,6 +69,7 @@ import argparse
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +88,35 @@ EXPECTED_STAYS_GE7 = 105
 N_STAYS = 140
 
 WARD_MEDIUM, WARD_HIGH = 5, 7
+
+# RCP 2017's single-parameter trigger: any one component scoring this much mandates
+# urgent review on its own. GCS is excluded from the *escalation* limb (see the module
+# docstring for the measurement that decided this) but still counts toward
+# `max_component`, which is reported for review.
+RED_COMPONENT_SCORE = 3
+ESCALATION_COMPONENTS = ("rr", "spo2", "sbp", "hr", "temp_c", "fio2")
+
+# GCS enters escalation as a *change*, not a level. A patient sedated at GCS 3 for
+# days is not deteriorating; a patient whose GCS falls 7 -> 3 in an hour is, and that
+# is precisely the case that exposed F1 (stay 34617352, hour 35: not sedated, GCS 7
+# for six hours then 3, dead within two days). A drop of this many points below the
+# preceding window's best, while no sedative is running, escalates.
+GCS_DROP_POINTS = 2
+GCS_DROP_LOOKBACK_H = 4
+
+# inputevents itemids for continuous/bolus sedation and analgesia. A GCS drop while
+# any of these is running is attributed to the drug, not to the brain.
+SEDATION_ITEMIDS = (
+    222168,  # Propofol
+    227210,  # Propofol (Intubation)
+    226224,  # Propofol Ingredient
+    221668,  # Midazolam (Versed)
+    229420,  # Dexmedetomidine (Precedex)
+    225150,  # Dexmedetomidine (Precedex)
+    221744,  # Fentanyl
+    225942,  # Fentanyl (Concentrate)
+    225972,  # Fentanyl (Push)
+)
 ICU_PERCENTILE_MEDIUM, ICU_PERCENTILE_HIGH = 0.75, 0.90
 
 
@@ -121,6 +189,140 @@ def news2_row(r: pd.Series) -> pd.Series:
     return pd.Series({"news2": s, "components": n})
 
 
+def component_scores(r: pd.Series) -> dict[str, int]:
+    """Every available NEWS2 component subscore for one patient-hour, keyed by the
+    grid's own column name. news2_row sums these; the single-parameter rule needs
+    them individually, which is exactly what the pre-F1 code threw away.
+    """
+    scorers = {
+        "rr": rr_score,
+        "spo2": spo2_score,
+        "sbp": sbp_score,
+        "hr": hr_score,
+        "temp_c": temp_score,
+        "gcs_total": gcs_score,
+        "fio2": fio2_score,
+    }
+    return {name: f(r[name]) for name, f in scorers.items() if pd.notna(r[name])}
+
+
+def red_flags(r: pd.Series) -> pd.Series:
+    """The single-parameter limb of NEWS2, as three reviewable columns.
+
+    ``max_component``          -- highest subscore across all seven parameters.
+    ``max_component_nongcs``   -- highest across ESCALATION_COMPONENTS only; this is
+                                  the one the escalation predicate reads.
+    ``red_params``             -- comma-joined names of every parameter at or above
+                                  RED_COMPONENT_SCORE, GCS included, so an alert can
+                                  say *which* parameter tripped it and a reviewer can
+                                  see the GCS-only cases that deliberately do not fire.
+    """
+    scores = component_scores(r)
+    red = [k for k, v in scores.items() if v >= RED_COMPONENT_SCORE]
+    non_gcs = [v for k, v in scores.items() if k in ESCALATION_COMPONENTS]
+    return pd.Series(
+        {
+            "max_component": max(scores.values()) if scores else 0,
+            "max_component_nongcs": max(non_gcs) if non_gcs else 0,
+            "red_params": ",".join(sorted(red)),
+        }
+    )
+
+
+def should_escalate(
+    tier_icu: str | None,
+    max_component_nongcs: int | None,
+    gcs_drop: bool | None = False,
+) -> bool:
+    """The escalation predicate, defined once and imported by every consumer
+    (agent-orchestrator's EscalationDecider, eval/alerting.py's replay,
+    eval/rag_agent.py's agreement metric, and risk-engine's response). Three limbs,
+    OR'd:
+
+      1. the ICU-recalibrated aggregate tier reaches 'high'      (E5)
+      2. any single non-GCS parameter scores 3                   (RCP 2017, finding F1)
+      3. GCS falls >= GCS_DROP_POINTS with no sedative running    (finding F1)
+
+    Limb 3 exists because limb 2 alone did not catch the case that exposed the bug:
+    that patient's only red parameter was GCS, and a level-based GCS trigger is
+    unusable in an ICU (71.5% of patient-hours). A *falling* GCS off sedation is both
+    specific and clinically the textbook deterioration signal.
+    """
+    return (
+        tier_icu == "high" or (max_component_nongcs or 0) >= RED_COMPONENT_SCORE or bool(gcs_drop)
+    )
+
+
+def escalation_reason(
+    tier_icu: str | None,
+    max_component_nongcs: int | None,
+    red_params: str | None,
+    gcs_drop: bool | None = False,
+) -> str:
+    """Which limb fired, in words, for the alert payload and the audit log."""
+    limbs = []
+    if tier_icu == "high":
+        limbs.append("ICU-recalibrated NEWS2 tier is 'high'")
+    if (max_component_nongcs or 0) >= RED_COMPONENT_SCORE:
+        named = [p for p in (red_params or "").split(",") if p and p != "gcs_total"]
+        limbs.append(
+            f"single-parameter red flag (RCP 2017): {', '.join(named)} "
+            f"scoring {max_component_nongcs}"
+        )
+    if gcs_drop:
+        limbs.append(
+            f"GCS fell >= {GCS_DROP_POINTS} points within {GCS_DROP_LOOKBACK_H}h "
+            f"with no sedative running"
+        )
+    if not limbs:
+        gcs_red = "gcs_total" in (red_params or "")
+        base = f"ICU-recalibrated NEWS2 tier is '{tier_icu}', below the high threshold"
+        return (
+            base + "; GCS is red but stable and/or sedated, so it does not escalate on level alone"
+            if gcs_red
+            else base
+        )
+    return " AND ".join(limbs)
+
+
+def sedation_intervals(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """stay_id + start/end of every sedative or analgesic administration."""
+    placeholders = ",".join(str(i) for i in SEDATION_ITEMIDS)
+    df = conn.execute(
+        f"SELECT stay_id, starttime, endtime FROM mimiciv_icu.inputevents "
+        f"WHERE itemid IN ({placeholders})"
+    ).fetchdf()
+    df["starttime"] = pd.to_datetime(df.starttime)
+    df["endtime"] = pd.to_datetime(df.endtime)
+    return df
+
+
+def add_gcs_drop(grid: pd.DataFrame, sedation: pd.DataFrame) -> pd.DataFrame:
+    """Adds ``sedated`` and ``gcs_drop`` to a grid that already carries stay_id, hour,
+    gcs_total and abs_time. Sorted by (stay_id, hour) on the way in, because the
+    rolling lookback is only meaningful in time order.
+    """
+    grid = grid.sort_values(["stay_id", "hour"]).reset_index(drop=True)
+    by_stay = {s: v[["starttime", "endtime"]].to_numpy() for s, v in sedation.groupby("stay_id")}
+
+    def _sedated(stay_id: int, t: pd.Timestamp) -> bool:
+        intervals = by_stay.get(stay_id)
+        if intervals is None:
+            return False
+        start = np.datetime64(t)
+        end = start + np.timedelta64(1, "h")
+        return bool(((intervals[:, 0] < end) & (intervals[:, 1] > start)).any())
+
+    grid["sedated"] = [_sedated(s, t) for s, t in zip(grid.stay_id, grid.abs_time, strict=True)]
+    prev_best = grid.groupby("stay_id").gcs_total.transform(
+        lambda s: s.shift(1).rolling(GCS_DROP_LOOKBACK_H, min_periods=1).max()
+    )
+    grid["gcs_drop"] = (
+        (prev_best - grid.gcs_total >= GCS_DROP_POINTS) & (~grid.sedated) & grid.gcs_total.notna()
+    )
+    return grid
+
+
 def tier(score: pd.Series, medium: float, high: float) -> pd.Series:
     return pd.cut(score, bins=[-1, medium - 1, high - 1, 999], labels=["low", "medium", "high"])
 
@@ -132,10 +334,19 @@ def main() -> int:
 
     conn = duckdb.connect(str(args.db))
     grid = conn.execute(
-        "SELECT stay_id, hour, hr, rr, spo2, sbp, temp_c, gcs_total, fio2 FROM capstone.hourly_grid"
+        "SELECT g.stay_id, g.hour, g.hr, g.rr, g.spo2, g.sbp, g.temp_c, g.gcs_total, g.fio2, "
+        "d.icu_intime "
+        "FROM capstone.hourly_grid g "
+        "JOIN mimiciv_derived.icustay_detail d USING (stay_id)"
     ).fetchdf()
+    grid["abs_time"] = pd.to_datetime(grid.icu_intime) + pd.to_timedelta(grid.hour, unit="h")
 
     grid[["news2", "components"]] = grid.apply(news2_row, axis=1)
+    grid[["max_component", "max_component_nongcs", "red_params"]] = grid.apply(red_flags, axis=1)
+    grid["max_component"] = grid["max_component"].astype(int)
+    grid["max_component_nongcs"] = grid["max_component_nongcs"].astype(int)
+    grid = add_gcs_drop(grid, sedation_intervals(conn))
+    grid = grid.drop(columns=["icu_intime", "abs_time"])
     print(f"NEWS2 computed for {len(grid):,} patient-hours")
     print(f"Median components available per hour: {grid.components.median():.0f} / 7")
 
@@ -183,6 +394,22 @@ def main() -> int:
     ward_rates = alert_rates("tier_ward")
     icu_rates = alert_rates("tier_icu")
 
+    # Finding F1: the two-limb escalation predicate, and what each limb contributes.
+    grid["escalates"] = [
+        should_escalate(t, m, d)
+        for t, m, d in zip(grid.tier_icu, grid.max_component_nongcs, grid.gcs_drop, strict=True)
+    ]
+    aggregate_limb = int((grid.tier_icu == "high").sum())
+    red_limb = int((grid.max_component_nongcs >= RED_COMPONENT_SCORE).sum())
+    drop_limb = int(grid.gcs_drop.sum())
+    both = int(grid.escalates.sum())
+    gcs_level_only = int(((grid.max_component >= RED_COMPONENT_SCORE) & (~grid.escalates)).sum())
+    print(
+        f"Escalating hours: {both:,} ({both / len(grid) * 100:.1f}%) "
+        f"[aggregate {aggregate_limb:,}, red-parameter {red_limb:,}, GCS-drop {drop_limb:,}]"
+    )
+    print(f"Red GCS by level only (sedated and/or stable): {gcs_level_only:,} hours")
+
     conn.execute("CREATE SCHEMA IF NOT EXISTS capstone")
     conn.execute("DROP TABLE IF EXISTS capstone.news2")
     conn.register("news2_df", grid)
@@ -220,6 +447,27 @@ everyone here is already sick enough to be in the ICU. The ICU-recalibrated cut-
 instead flag the {100 * (1 - ICU_PERCENTILE_MEDIUM):.0f}% of this cohort's own
 patient-hours with the highest NEWS2, i.e. relative deterioration within an ICU
 population rather than absolute deterioration relative to a ward population.
+
+## Single-parameter escalation (finding F1)
+
+NEWS2 (RCP 2017) has two independent escalation triggers, not one. Alongside the
+aggregate tier above, **a score of {RED_COMPONENT_SCORE} in any single parameter**
+mandates urgent review on its own. `capstone.news2` now stores `max_component`,
+`max_component_nongcs` and `red_params` so both limbs are computable, and
+`should_escalate()` is the single definition every consumer imports.
+
+| Limb | Patient-hours |
+|---|---|
+| ICU-recalibrated aggregate tier == high | {aggregate_limb:,} |
+| Any non-GCS parameter scoring {RED_COMPONENT_SCORE} | {red_limb:,} |
+| GCS falling >= {GCS_DROP_POINTS} points off sedation | {drop_limb:,} |
+| **Any of the three (the escalation predicate)** | **{both:,} ({100 * both / len(grid):.1f}%)** |
+
+GCS enters as a *change*, not a level. A red GCS level alone accounts for
+{gcs_level_only:,} further patient-hours -- overwhelmingly sedated patients -- and
+escalating on it fires on 71.5% of the cohort. A GCS *drop* off sedation is specific
+enough to cost roughly one extra percentage point of alert burden. See the module
+docstring for the measurement of every variant against the 78 composite events.
 """
     REPORT_FILE.write_text(report)
     print(f"\nWrote capstone.news2 ({len(grid):,} rows) to {args.db}")

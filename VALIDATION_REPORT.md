@@ -1,0 +1,267 @@
+# Independent validation report
+
+**Reviewer:** Opus 5 · **Date:** 2026-09-08 · **Subject:** Phases 0–8 as built by Sonnet-5
+**Method:** every claim re-run locally from a clean tree. Nothing below is taken from a README
+without being independently reproduced, except the three items listed under "Not re-verified".
+
+---
+
+## Verdict
+
+**The build is real and the engineering is honest.** 284 tests pass, the warehouse reconciles
+exactly to the EDA, and the architectural guarantees in PROJECT_PLAN.md section 4 are implemented
+in code rather than asserted in documentation. The READMEs consistently under-claim rather than
+over-claim — including reporting a headline result (15.4% alert coverage) that reflects badly on
+the system.
+
+**Four defects found.** One is clinically material and has a quantified fix. None invalidate the
+architecture.
+
+> **Update 2026-09-08 — F1 and F2 are fixed and verified.** F1 raised event coverage from 15.4% to
+> **41.0%**; F2 makes all seven mapped FHIR resource types publish with references resolving. Fixing
+> F1 surfaced two further defects (a hand-copied second definition of the escalation rule in
+> `eval/rag_agent.py`, and a FHIR `code` whitespace violation that 500'd every
+> MedicationAdministration), both fixed. Suite is now **309 passed, 3 skipped**. F3 and F4 remain
+> open. Details in each finding below.
+
+**9 of 11 deliverables verified end-to-end by me. 2 are overstated** — deliverable 1 and
+deliverable 5 pass in substance but fail their acceptance tests exactly as written.
+
+---
+
+## What I verified
+
+| Area | Evidence reproduced |
+|---|---|
+| Test suite | 274 passed / 12 skipped with no infra; **284 passed / 2 skipped** with Kafka+Postgres+EMQX+HAPI+Keycloak up. 10 of 12 skips were genuinely infra-gated |
+| Warehouse | `chartevents` 668,862 · `labevents` 107,727 · `icustays` 140 · **`hourly_grid` 12,004** — all match the EDA exactly. 65/65 concepts built. SOFA covers all 140 stays |
+| E5 recalibration | `capstone.news2` carries both `tier_ward` and `tier_icu`. Confirmed live: NEWS2=8 is `high` on ward, `medium` on ICU |
+| R6 (q4h dedup) | `dedup_key` buckets to `…T00:00:00` / `…T08:00:00`. Calendar buckets, with reasoning for why a rolling window would be wrong |
+| R1 (leakage guard) | Rows at `hour >= h_event` are **dropped**, not labelled 0. Windows anchored to hours-since-ICU-admission |
+| Grouped CV | `StratifiedGroupKFold` grouped on `subject_id` |
+| ECG join | `merge_asof(direction="backward")`, 72h tolerance — past studies only, no future leakage |
+| Death attribution | Independently confirmed their bug fix: 20 flag-carrying stays → **15 real death events**. Their cited case (hadm 22942076) verified: first ICU stay ends 2111-11-14 00:14, death 2111-11-15 17:20 during the *second* stay |
+| Audit chain | Clean chain verifies; tampering row 3 detected at exactly `seq=3` |
+| Agent graph | 6 nodes in plan order, every node wrapped in `audited()`. Escalation decided **before** the LLM is called; LLM output stored as advisory only |
+| Fact ledger | 1,314 sentences, 1,674 citations, **0 dangling**, 0 inline/list mismatches. Catalog carries full `(table, row_id, column)` provenance |
+| FHIR | `Patient` and `Device` mapped and accepted by live HAPI (server-assigned ids, versionId) |
+| UI | `tsc -b && vite build` clean, 43 modules |
+| K8s / Helm | 9 charts lint clean; 38 resources render — 9 Deployment, 9 Service, 9 NetworkPolicy, 9 PDB, **2 HPA** (exactly the two services the plan named). `default-deny` NetworkPolicy present |
+| Latency | k6 passes against 5 live services |
+
+---
+
+## Findings
+
+### F1 — Escalation drops NEWS2's single-parameter rule *(high, clinically material)* — **FIXED**
+
+`services/agent-orchestrator/nodes.py:180` escalates on `tier == "high"` alone, and
+`warehouse/news2.py:124` derives that tier purely from the **aggregate** score. NEWS2 (RCP 2017)
+specifies a second, independent trigger: **a score of 3 in any single parameter mandates urgent
+review regardless of total.** The component scores are computed and then discarded.
+
+Observed live on stay 34617352 hour 35 — GCS 3 (deepest possible coma), SOFA-24h 12, FiO2 60%:
+
+```
+escalate            : False
+escalation_reason   : ICU-recalibrated NEWS2 tier is 'medium', below the high threshold
+llm_advisory        : I disagree, because the extremely low GCS and high SOFA score
+                      indicate critical deterioration that warrants ICU escalation...
+```
+
+The LLM advisory was right and the policy was wrong. This patient died. The architecture
+captured the disagreement in the audit log, which is the design working — but nothing acts on it.
+
+**This is a second cause of the project's headline weakness** (15.4% alert coverage), distinct
+from the "events happen 1–3h after admission" explanation in `eval/README.md`.
+
+The naive fix is wrong: applying the strict rule fires on 59% of all patient-hours, because
+GCS 3 is routine in sedated ICU patients. Excluding GCS and keeping the rule for the other
+components was measured against all 78 composite events:
+
+| Rule | Event coverage | Median lead | Fires on |
+|---|---|---|---|
+| Current (aggregate ICU tier == high) | 12/78 (15.4%) | 0.75h | 12.8% of hours |
+| **+ single red parameter, excl. GCS** | **32/78 (41.0%)** | 0.49h | 31.8% of hours |
+| Ward-standard aggregate (reference) | 31/78 (39.7%) | 0.48h | 48.8% of hours |
+
+The proposed rule **dominates the ward-standard baseline** — slightly better coverage at a third
+less alert burden. Cost is 2.5× more alerts than today.
+
+Better still: MIMIC records sedation (2,020 administrations across 64 stays), so GCS could be
+*qualified by concurrent sedation* rather than dropped outright.
+
+**Fix:** add a `max_component` column in `warehouse/news2.py`, escalate on
+`tier == "high" or max_component_excluding_gcs >= 3`, and document the deviation either way. The
+current silent departure from the standard the code claims to implement is the actual defect.
+
+### F2 — FHIR publish breaks referential integrity *(medium-high)* — **FIXED**
+
+`fhir-mapper` POSTs resources, so HAPI assigns its own ids. `Patient/10006053` becomes
+`Patient/2`, and every reference to it then dangles:
+
+```
+Encounter    -> HAPI-1094: Resource Patient/10006053 not found, specified in path: Encounter.subject
+RiskAssessment -> same
+Patient, Device -> 200 OK (no outbound references)
+```
+
+So deliverable 5's "HAPI FHIR validates **every** emitted resource" holds only for standalone
+resources. `PUT` with the logical id doesn't help — HAPI rejects purely-numeric client-assigned
+ids (`HAPI-0960`).
+
+**Verified fix:** a transaction Bundle with conditional references. Tested working:
+
+```
+POST /fhir  (transaction Bundle, PUT Patient?identifier=…|10006053, PUT Encounter?identifier=…)
+  -> 200 OK      Patient/2/_history/1
+  -> 201 Created Encounter/4/_history/1
+```
+
+The mapper already emits the right business identifiers, so this is a contained change to
+`hapi_client.py`.
+
+### F3 — Replay simulators cannot drive the live pipeline *(medium)* — open
+
+`simulators/sinks.py` implements `ConsoleSink` and `JSONLSink` only. Line 6 acknowledges an
+ingest-gateway sink "becomes a third Sink" — planned, never built. `grep` confirms nothing in
+`simulators/` posts to `:8000/observations`.
+
+The service chain genuinely works — `eval/load/ramp.js` drives obs → window → score → alert →
+notify and passes. But it is driven by k6 fixtures, not by the replays.
+
+Deliverable 1's acceptance test — "both replays raise alerts through one engine" — is therefore
+**not demonstrable as written**, and it is marked ✅ in the README. This is the single biggest gap
+between claimed and demonstrable, and it is roughly a 30-line `HTTPSink`.
+
+### F4 — No fairness analysis, and `gender` is the #3 SHAP feature *(medium)* — open
+
+`gender` ranks third by mean |SHAP| in the promoted model, above most vitals. In this cohort the
+association is statistically real — 66.2% of male stays have an event vs 42.9% of female
+(Fisher OR 2.62, p=0.007) — but that is a 100-patient sample and will not transfer.
+
+There is **no subgroup or fairness analysis anywhere** in `ml/` or `eval/`. `docs/compliance.md`
+mentions fairness; nothing measures it. For a clinical AI capstone this is both a credibility gap
+and a guaranteed question from any reviewer.
+
+**Fix:** add per-subgroup AUROC/AUPRC to `eval/report.py`, and state explicitly whether `gender`
+is retained as a legitimate clinical covariate (it is one, in SAPS-II and APACHE) or dropped.
+
+### F5 — `ui/tsconfig.tsbuildinfo` not gitignored *(trivial)*
+
+Reappears on every UI build and dirties the tree.
+
+---
+
+## Not re-verified by me
+
+Stated for completeness — each is documented with specific evidence by the builder, and I have no
+reason to doubt any of them, but I did not reproduce them in this session:
+
+1. **Live `kind` cluster: HPA scaling under load, chaos-kill survival.** This machine gives Docker
+   4GB; a kind cluster plus the compose stack would not fit. Manifests and charts verified
+   structurally instead.
+2. **Physical Wear OS watch.** `edge/wear_os/README.md` documents an emulator run, not hardware.
+3. **Notes were generated with Groq `gpt-oss-120b`, not `claude-sonnet-5`.** Both backends are
+   implemented with per-provider cost tracking; the plan specified Anthropic. A documented
+   substitution, not a defect — but the generated corpus reflects the Groq model.
+
+---
+
+## Code review assessment
+
+Better than the plan asked for, in three specific ways.
+
+**It found bugs the plan didn't anticipate.** The death-attribution issue is genuinely subtle —
+`hospital_expire_flag` propagates from admission to every ICU stay beneath it, and a naive
+implementation labels an earlier, live-discharged stay as "about to die". They caught it, fixed
+it correctly, and documented it with a reproducible example. I verified it independently.
+
+**Design rules are implemented, not just cited.** R1, R2, R5, R6 all appear in code with comments
+tracing back to the EDA finding that motivated them. R6's calendar-vs-rolling-bucket reasoning is
+the kind of detail that gets lost between plan and implementation.
+
+**Failure is reported rather than hidden.** The 15.4% alert-coverage result is prominent in both
+the top-level README and `eval/README.md`, framed as a real finding. The compose README explicitly
+declines to claim a simultaneous nine-service `up` that wasn't exercised. Skipped tests
+self-detect missing infrastructure and name where to start it.
+
+The weaknesses cluster in one place: **claims in the deliverable-status table are more absolute
+than the code supports.** F1, F2 and F3 are all cases where a ✅ is defensible in spirit but fails
+the acceptance test as literally written. The per-phase READMEs are careful; the summary table is
+not.
+
+---
+
+## Appendix — how F1 and F2 were fixed (2026-09-08)
+
+### F1 — the escalation rule now has three limbs
+
+`warehouse/news2.py` gained `should_escalate()` and `escalation_reason()`, defined **once** and
+imported by `agent-orchestrator`'s EscalationDecider, `eval/alerting.py`'s replay,
+`eval/rag_agent.py`'s agreement metric, and `risk-engine`'s response. `capstone.news2` now stores
+`max_component`, `max_component_nongcs`, `red_params`, `sedated` and `gcs_drop`.
+
+| Limb | Trigger |
+|---|---|
+| 1 | ICU-recalibrated aggregate tier reaches `high` (E5, unchanged) |
+| 2 | Any single non-GCS parameter scores 3 (RCP 2017) |
+| 3 | GCS falls ≥2 points within 4h with no sedative running |
+
+**Why limb 3 exists, and why the "efficient" answer was rejected.** Limb 2 alone scores best on
+coverage-per-alert (1.29 vs 1.25) — but it does **not** catch the patient who exposed the bug.
+Stay 34617352's only red parameter was GCS, so a rule that ignores GCS leaves that death exactly
+as unflagged as the original bug did. What separates that patient from a sedated one is
+trajectory: GCS 7 for six hours, then 3, off sedation. Limb 3 costs ~1pp of alert burden and is
+the clinically defensible answer; "we ignore GCS" is not something to tell a clinician when a
+falling GCS is the textbook deterioration sign.
+
+Verified live: that patient now returns `escalate: True`, reason `GCS fell >= 2 points within 4h
+with no sedative running` — and the LLM advisory, which previously *disagreed with the policy and
+was right*, now agrees.
+
+| Metric | Before | After |
+|---|---|---|
+| Events with a preceding alert | 12/78 (15.4%) | **32/78 (41.0%)** |
+| Median lead time | 0.75h | 0.63h |
+| Patient-hours alerted | 12.8% | 32.9% |
+| Alerts per patient-day | 1.59 | 3.56 |
+
+Fixing this surfaced a further defect: `eval/rag_agent.py`'s `escalation_agreement` had a
+**hand-copied second definition** of the rule. Because both copies were wrong in the same
+direction, the metric reported 100% agreement for a policy that was dropping a NEWS2 trigger. It
+now imports the shared predicate. This is the clearest argument in the codebase for defining a
+rule once.
+
+### F2 — FHIR publish keyed on business identifiers
+
+`services/fhir-mapper/hapi_client.py` was rewritten. Publishing now goes through a `transaction`
+Bundle: resources with a known business identifier are sent as **conditional updates**
+(`PUT Patient?identifier=urn:mimic-iv:subject_id|10006053`) and outbound references are rewritten
+to **conditional references**, which FHIR resolves server-side. `/fhir/_publish` accepts a list,
+publishing it as one transaction so a referent and its dependants land together.
+
+Verified against a live HAPI server: all seven mapped resource types publish, references resolve
+to real server ids (`Patient/11` → `Encounter/12` → `MedicationAdministration` citing both), and
+republishing is idempotent (same id, not a duplicate patient).
+
+Non-FHIR reference strings the Observation contract legitimately carries (`ICUStay/…`,
+`Subject/S05`) are deliberately left untouched — rewriting them would invent a mapping that does
+not exist. That remains a separate modelling question.
+
+**A further defect found while verifying this:** every `MedicationAdministration` for an admission
+500'd, because FHIR's `code` primitive forbids consecutive whitespace and the EMAR drug name
+`"Sodium Chloride 0.9%  Flush"` carries a double space. `mappers.py` now normalises the code token
+and preserves the original verbatim in `display`.
+
+### Still open
+
+**F3** (replay simulators cannot drive the live pipeline) and **F4** (no fairness/subgroup
+analysis, `gender` ranks #3 by SHAP) are unchanged. Neither was in scope for this pass.
+
+### Verification
+
+`313 passed, 3 skipped` with Kafka, Postgres, EMQX, HAPI FHIR and Keycloak running. `ruff check`
+clean; `mypy` clean on the changed modules. New regression tests pin every limb, including
+`test_the_motivating_case_now_escalates`, which names stay 34617352 hour 35 directly so this
+specific patient can never silently stop escalating again.
