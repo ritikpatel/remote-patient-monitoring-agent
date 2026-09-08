@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Event Studio</title>
+<style>
+ :root{--bg:#eef1f0;--surface:#fff;--ink:#111f1d;--muted:#5b6b68;--line:#d3dad8;
+       --ok:#0c7a69;--warn:#9e5c0a;--crit:#b03a2b;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+ @media (prefers-color-scheme:dark){:root{--bg:#0d1513;--surface:#161f1d;--ink:#e7edeb;
+       --muted:#94a3a0;--line:#283634;--ok:#43c0a9;--warn:#e0a24a;--crit:#e67c6e}}
+ *{box-sizing:border-box}
+ body{margin:0;padding:32px 20px 64px;background:var(--bg);color:var(--ink);
+      font:15px/1.6 system-ui,-apple-system,sans-serif}
+ .wrap{max-width:940px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+ h1{font-size:26px;margin:0;letter-spacing:-.01em}
+ .sub{color:var(--muted);margin:0;max-width:70ch}
+ .warnbar{background:var(--surface);border-left:3px solid var(--warn);padding:10px 14px;
+          font-size:13px;color:var(--muted);border-radius:0 4px 4px 0}
+ .panel{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:20px;
+        display:flex;flex-direction:column;gap:16px}
+ .row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+ label{font-size:13px;color:var(--muted);min-width:74px}
+ input[type=range]{flex:1;min-width:220px;accent-color:var(--ok)}
+ input[type=text]{padding:7px 10px;border:1px solid var(--line);border-radius:4px;
+                  background:var(--bg);color:var(--ink);font-family:var(--mono);font-size:13px}
+ button{padding:9px 16px;border-radius:4px;border:1px solid var(--ok);background:var(--ok);
+        color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+ button.ghost{background:transparent;color:var(--ok)}
+ button:disabled{opacity:.5;cursor:not-allowed}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:1px;
+       background:var(--line);border:1px solid var(--line);border-radius:5px;overflow:hidden}
+ .cell{background:var(--surface);padding:10px 12px}
+ .cell .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+ .cell .v{font-family:var(--mono);font-size:19px;font-variant-numeric:tabular-nums}
+ .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600;
+       font-family:var(--mono)}
+ .s0{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+ .s1{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+ .s3{background:color-mix(in srgb,var(--crit) 18%,transparent);color:var(--crit)}
+ .verdict{padding:14px 18px;border-radius:5px;border:1px solid var(--line);
+          display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+ .verdict.fire{border-color:var(--crit);background:color-mix(in srgb,var(--crit) 8%,transparent)}
+ .verdict .big{font-size:30px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+ pre{background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:12px;
+     font-size:12px;overflow-x:auto;margin:0;font-family:var(--mono)}
+ .muted{color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>Event Studio</h1>
+    <p class="sub">Compose a complete patient event &mdash; every channel the risk model was
+    trained on &mdash; and push it through the real pipeline.</p>
+  </div>
+  <div class="warnbar"><strong>Synthetic drill.</strong> Every value here is generated, watermarked
+  <code>synthetic</code> on the wire, and describes no real patient. SMS defaults to dry-run.</div>
+
+  <div class="panel">
+    <div class="row">
+      <label for="sev">Severity</label>
+      <input type="range" id="sev" min="0" max="100" value="55">
+      <span id="sevv" class="pill s1" style="min-width:44px;text-align:center">0.55</span>
+    </div>
+    <div class="row">
+      <label for="pt">Patient</label>
+      <input type="text" id="pt" value="Patient/10005866" size="24">
+      <button class="ghost" id="rand">Randomise</button>
+      <button id="gen">Generate</button>
+      <button id="send" disabled>Send to pipeline</button>
+    </div>
+    <p class="muted" id="status">Move the slider, then Generate. Nothing is sent until you press Send.</p>
+  </div>
+
+  <div class="panel" id="out" hidden>
+    <div class="verdict" id="verdict">
+      <div><div class="k muted">NEWS2</div><div class="big" id="news2">&mdash;</div></div>
+      <div><div class="k muted">ICU tier</div><div class="big" id="tier">&mdash;</div></div>
+      <div style="flex:1"><div class="k muted">Escalation</div><div id="why">&mdash;</div></div>
+    </div>
+    <div class="grid" id="vals"></div>
+    <div id="smsbox" hidden><div class="k muted" style="margin-bottom:5px">SMS to clinician</div>
+      <pre id="sms"></pre></div>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const UNITS={hr:"bpm",rr:"/min",spo2:"%",sbp:"mmHg",map:"mmHg",temp_c:"°C",gcs_total:"",fio2:"%",glucose:"mg/dL"};
+let last=null;
+const sevVal=()=>(+$("sev").value/100);
+function paintSev(){const v=sevVal();const e=$("sevv");e.textContent=v.toFixed(2);
+  e.className="pill "+(v<.34?"s0":v<.67?"s1":"s3");}
+$("sev").oninput=()=>{paintSev();$("send").disabled=true;};
+$("rand").onclick=()=>{ // biased high: a drill is more useful when it fires
+  $("sev").value=Math.round(45+Math.random()*55);paintSev();go(false);};
+$("gen").onclick=()=>go(false);
+$("send").onclick=()=>go(true);
+
+async function go(send){
+  $("status").textContent=send?"Sending…":"Generating…";
+  const r=await fetch("/event",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({severity:sevVal(),patient_ref:$("pt").value,send:send})});
+  const d=await r.json();last=d;render(d,send);
+}
+function render(d,sent){
+  $("out").hidden=false;$("news2").textContent=d.news2;$("tier").textContent=d.tier_icu;
+  $("why").textContent=(d.would_escalate?"WOULD FIRE — ":"no alert — ")+d.why;
+  $("verdict").className="verdict"+(d.would_escalate?" fire":"");
+  $("vals").innerHTML=Object.entries(d.values).map(([k,v])=>{
+    const s=d.subscores[k];const cls=s===undefined?"":s>=3?"s3":s>0?"s1":"s0";
+    const badge=s===undefined?"":`<span class="pill ${cls}">+${s}</span>`;
+    return `<div class="cell"><div class="k">${k} ${badge}</div>
+            <div class="v">${v}<span class="k"> ${UNITS[k]||""}</span></div></div>`;}).join("");
+  $("send").disabled=false;
+  if(d.sms){$("smsbox").hidden=false;$("sms").textContent=
+      `mode: ${d.sms.mode}\nto:   ${d.sms.to||"(provider)"}\n\n${d.sms.text}`;}
+  else $("smsbox").hidden=true;
+  $("status").textContent=sent
+    ?(d.sent?`Sent to ingest-gateway (HTTP ${d.gateway_status}).`
+            :`Not sent — ${d.gateway_error||("gateway HTTP "+d.gateway_status)}`)
+    :"Generated. Press Send to push it through the pipeline.";
+}
+paintSev();go(false);
+</script>
+</body></html>
