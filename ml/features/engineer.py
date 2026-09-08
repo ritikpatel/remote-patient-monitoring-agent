@@ -220,10 +220,25 @@ def feature_matrix_for_training(
     labels_df: pd.DataFrame,
     label_col: str,
     include_ecg: pd.DataFrame | None = None,
+    include_demographics: bool = False,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Inner-join the full feature frame to the at-risk labelled rows, and
     return (X, y, groups) ready for ``models.splits``. ``groups`` is
     ``stay_id`` -- grouped CV must never let one patient span train and test.
+
+    ``include_demographics`` controls ``gender`` only, and defaults to **False**
+    (review finding F4). It used to be included unconditionally and ranked third by
+    mean |SHAP|, above most vitals. The association is real in this cohort -- 66.2% of
+    male stays reach a composite event against 42.9% of female, Fisher OR 2.62,
+    p=0.007 -- but a 20-repeat grouped-CV ablation showed it does not earn its place:
+    AUPRC 0.5065 with against 0.4953 without, a +0.011 delta inside a bootstrap CI
+    roughly twenty times that wide, winning in only 13 of 20 repeats. A feature that
+    performs like a coin flip and invites a fairness objection is not worth carrying;
+    the model that never saw it is the one that is easier to defend.
+
+    ``ml/evaluation/fairness.py`` passes True to recover the subgroup labels it audits
+    on, then drops the column again before fitting -- one merge path, so the audited
+    rows and the modelled rows can never drift apart.
     """
     merged = labels_df[["stay_id", "hour", label_col]].merge(
         features, on=["stay_id", "hour"], how="inner"
@@ -236,7 +251,11 @@ def feature_matrix_for_training(
         cols += [c for c in include_ecg.columns if c not in ("stay_id", "hour")]
 
     x = merged[cols].copy()
-    x["gender"] = merged["gender"]
+    if include_demographics:
+        x["gender"] = merged["gender"]
+    # first_careunit stays: it is clinical context (which ICU a patient is in), not a
+    # protected demographic attribute. admission_age likewise -- age is a validated
+    # covariate in SAPS-II and APACHE, not a proxy.
     x["first_careunit"] = merged["first_careunit"]
     y = merged[label_col]
     groups = merged["stay_id"]

@@ -21,7 +21,7 @@ aliases it to 3.13, which has no dependencies installed. Always use `.venv/bin/p
 ```bash
 .venv/bin/python -m pytest -q
 ```
-Expect **313 passed, 3 skipped**. The 12 skips are infrastructure-gated and self-detecting —
+Expect **317 passed, 6 skipped**. The 12 skips are infrastructure-gated and self-detecting —
 they name exactly what is missing. This is the single best opening demo: it runs with no Docker.
 
 ## 2. The warehouse (already built — verify, don't rebuild)
@@ -66,21 +66,34 @@ because real Kafka, Postgres, MQTT, HAPI and Keycloak are now reachable.
 ## 5. Start the services
 
 ```bash
-start() { nohup .venv/bin/python -m uvicorn app:app --app-dir "services/$1" --port "$2" \
-          > "/tmp/rpm-logs/$1.log" 2>&1 & }
 mkdir -p /tmp/rpm-logs
-start ingest-gateway 8000
-start risk-engine 8001
-start stream-processor 8003
-start alert-service 8005
-start notification-gateway 8006
-start rag-service 8004
-start agent-orchestrator 8007
-start clinician-api 8008
-HAPI_FHIR_BASE_URL=http://localhost:8090/fhir \
-  nohup .venv/bin/python -m uvicorn app:app --app-dir services/fhir-mapper --port 8002 \
-  > /tmp/rpm-logs/fhir-mapper.log 2>&1 &
-sleep 25
+run() { env "$@" nohup .venv/bin/python -m uvicorn app:app --app-dir "services/$SVC" \
+        --port "$PORT" > "/tmp/rpm-logs/$SVC.log" 2>&1 & }
+
+SVC=risk-engine          PORT=8001 run
+SVC=alert-service        PORT=8005 run
+SVC=notification-gateway PORT=8006 run
+SVC=rag-service          PORT=8004 run
+SVC=agent-orchestrator   PORT=8007 run
+SVC=clinician-api        PORT=8008 run
+
+# fhir-mapper needs HAPI or publishing returns a clear 503 rather than a fake pass.
+SVC=fhir-mapper PORT=8002 run HAPI_FHIR_BASE_URL=http://localhost:8090/fhir
+
+# These two carry the live pipeline. Without PUBLISHER_BACKEND the gateway keeps
+# observations in memory; without RISK_ENGINE_URL/ALERT_SERVICE_URL stream-processor
+# windows them and stops there. Both default to off, so the replay demo in step 6f
+# silently does nothing if you skip these env vars.
+SVC=ingest-gateway PORT=8000 run \
+  PUBLISHER_BACKEND=kafka KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+SVC=stream-processor PORT=8003 run \
+  KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
+  RISK_ENGINE_URL=http://localhost:8001 \
+  ALERT_SERVICE_URL=http://localhost:8005 \
+  NOTIFICATION_GATEWAY_URL=http://localhost:8006
+
+sleep 26
+curl -s http://localhost:8003/escalation/stats   # expect {"enabled": true, ...}
 for p in 8000 8001 8002 8003 8004 8005 8006 8007 8008; do
   printf ":%s %s\n" "$p" "$(curl -s -m3 -o /dev/null -w '%{http_code}' http://localhost:$p/health)"
 done
@@ -145,12 +158,34 @@ curl -s http://localhost:8002/fhir/Encounter/22942076 -o /tmp/enc.json
 curl -s -X POST http://localhost:8002/fhir/_publish -H 'content-type: application/json' --data @/tmp/txn.json | .venv/bin/python -m json.tool
 ```
 
-**f. The replay**
+**f. The replay — driving the live system**
+
+Console first, to show the wire shape: one ICU hour per wall-clock second, LOINC-coded, with
+`imputed` flags on carried-forward values.
 ```bash
 .venv/bin/python simulators/icu_replay.py --stay-id 34617352 --compress 3600
 ```
-One ICU hour per wall-clock second, LOINC-coded, with `imputed` flags on carried-forward values.
-(This prints to console; it does **not** feed the services — finding F3.)
+
+Then the same replay into the running pipeline. **This is deliverable 1's acceptance test**, and
+it needs `stream-processor` started with the escalation env vars from step 5:
+```bash
+.venv/bin/python simulators/icu_replay.py --stay-id 34807493 --compress 3600 --sink http --no-sleep
+curl -s http://localhost:8003/escalation/stats | .venv/bin/python -m json.tool
+curl -s http://localhost:8005/alerts/active | .venv/bin/python -m json.tool
+```
+382 observations → gateway → Kafka → stream-processor → risk-engine → alert-service. Expect ~49
+scored, ~22 escalated, and **one** alert: the 4-hourly dedup (R6) collapsing the repeats.
+
+Now the same engine, a completely different producer:
+```bash
+.venv/bin/python simulators/wearable_replay.py --activity STRESS --participant S05 \
+  --duration-s 900 --sink http --no-sleep
+```
+152,097 observations at true device rate (BVP 64 Hz), and **zero alerts** — because this is a
+healthy volunteer. That is the point worth making out loud: the sick patient alerts, the healthy
+one does not, through one engine with no per-source logic. (Until F3 let the wearable path reach
+the scorer, it would have raised a false hypothermia alert on every subject — E4 `TEMP` is wrist
+skin temperature, not core.)
 
 **g. Audit chain**
 ```bash

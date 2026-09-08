@@ -55,10 +55,10 @@ building it, and how it was verified.
 
 | # | Deliverable | Owning phase | Acceptance test | Status |
 |---|---|---|---|---|
-| 1 | Real-Time Patient Monitoring System | P2, P4 | Live watch + both replays raise alerts through one engine | ✅ |
+| 1 | Real-Time Patient Monitoring System | P2, P4 | Live watch + both replays raise alerts through one engine | ✅ `--sink http` + stream-processor's escalation loop; verified live (F3 fixed) |
 | 2 | Agentic AI Clinical Monitoring Engine | P4 | Agent graph produces a scored, cited escalation decision with a full audit trail | ✅ |
 | 3 | Early Warning & Alert System | P1, P4 | Recalibrated NEWS2 fires with measured lead time to event | ✅ all three NEWS2 limbs; 41.0% event coverage, 0.63h median lead (F1 fixed) |
-| 4 | Predictive Risk Modeling Module | P5 | Beats NEWS2 on AUPRC in ≥15 of 20 CV repeats | ✅ 20/20 |
+| 4 | Predictive Risk Modeling Module | P5 | Beats NEWS2 on AUPRC in ≥15 of 20 CV repeats | ✅ 20/20, with a subgroup fairness audit; `gender` dropped on ablation (F4 fixed) |
 | 5 | FHIR-Based Integration Layer | P4 | HAPI FHIR validates every emitted resource | ✅ all 7 mapped resource types, references resolved, against a live HAPI server (F2 fixed) |
 | 6 | RAG-Powered Clinical Summarization | P3, P4 | Every claim traces to a fact-ledger entry | ✅ |
 | 7 | Smart Hospital Connectivity Layer | P6 | Remote clinician sees live vitals and acknowledges an alert off-site | ✅ |
@@ -104,7 +104,7 @@ docker compose -f infra/compose/docker-compose.yml up -d <services you need>
 # see infra/compose/README.md — an 8GB machine can't run everything at once
 
 # 5. Everything
-pytest -q   # 313 passed, 3 skipped (skips self-detect missing optional infra)
+pytest -q   # 317 passed, 6 skipped (skips self-detect missing optional infra)
 ```
 
 ## What's real vs. what's honestly scoped

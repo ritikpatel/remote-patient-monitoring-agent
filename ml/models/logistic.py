@@ -26,7 +26,11 @@ CATEGORICAL_COLUMNS = ["gender", "first_careunit"]
 
 
 def build_pipeline(feature_columns: list[str]) -> Pipeline:
-    numeric_columns = [c for c in feature_columns if c not in CATEGORICAL_COLUMNS]
+    # Follow the actual columns, not the module constant: a categorical column can be
+    # legitimately absent (the demographic ablation in ml/evaluation/fairness.py drops
+    # `gender`), and naming a missing column in a ColumnTransformer is a hard error.
+    categorical_columns = [c for c in CATEGORICAL_COLUMNS if c in feature_columns]
+    numeric_columns = [c for c in feature_columns if c not in categorical_columns]
     preprocessor = ColumnTransformer(
         transformers=[
             (
@@ -42,7 +46,7 @@ def build_pipeline(feature_columns: list[str]) -> Pipeline:
             (
                 "categorical",
                 OneHotEncoder(handle_unknown="ignore"),
-                CATEGORICAL_COLUMNS,
+                categorical_columns,
             ),
         ]
     )

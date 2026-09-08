@@ -25,6 +25,7 @@ import sys
 import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -100,12 +101,48 @@ class WindowStore:
         with self._lock:
             return list(self._latest.keys())
 
+    def latest_values(self, patient_ref: str) -> dict[str, float]:
+        """Most recent value per channel for one patient, by LOINC code.
+
+        The window buffers hold every recent point per channel; scoring a patient
+        needs one number per channel, which is the newest by ``effective_time`` --
+        not by arrival order, since a replay can deliver channels out of order within
+        a simulated hour. Added for the F3 escalation loop.
+        """
+        with self._lock:
+            out: dict[str, float] = {}
+            for (ref, code), buf in self._buffers.items():
+                if ref != patient_ref or not buf:
+                    continue
+                out[code] = max(buf, key=lambda o: o.effective_time).value
+            return out
+
+    def recent_max(self, patient_ref: str, code: str, hours: float) -> float | None:
+        """Highest value for one channel over the trailing ``hours`` of *stream* time,
+        excluding the newest point. This is the "recent best" NEWS2's GCS-drop limb
+        compares against, and it is measured in effective_time so it means the same
+        thing under time compression as it does in real time.
+        """
+        with self._lock:
+            buf = self._buffers.get((patient_ref, code))
+            if not buf or len(buf) < 2:
+                return None
+            ordered = sorted(buf, key=lambda o: o.effective_time)
+            newest = ordered[-1]
+            cutoff = newest.effective_time - timedelta(hours=hours)
+            prior = [o.value for o in ordered[:-1] if o.effective_time >= cutoff]
+            return max(prior) if prior else None
+
 
 DEFAULT_GROUP_ID = "stream-processor"
 
 
 def _consume_forever(
-    store: WindowStore, bootstrap_servers: str, stop_event: threading.Event, group_id: str
+    store: WindowStore,
+    bootstrap_servers: str,
+    stop_event: threading.Event,
+    group_id: str,
+    escalation: object | None = None,
 ) -> None:
     from kafka import KafkaConsumer
 
@@ -160,6 +197,11 @@ def _consume_forever(
                     logger.warning("stream-processor: skipping unparseable message", exc_info=True)
                     continue
                 store.ingest(obs)
+                if escalation is not None:
+                    # Finding F3: this is what closes stream -> score -> alert.
+                    # on_observation never raises; a scoring or alerting failure is
+                    # counted there and must not stop the consumer windowing.
+                    escalation.on_observation(store, obs)  # type: ignore[attr-defined]
     finally:
         consumer.close()
 
@@ -171,18 +213,31 @@ class KafkaConsumerThread:
     """
 
     def __init__(
-        self, store: WindowStore, bootstrap_servers: str, group_id: str = DEFAULT_GROUP_ID
+        self,
+        store: WindowStore,
+        bootstrap_servers: str,
+        group_id: str = DEFAULT_GROUP_ID,
+        escalation: object | None = None,
     ) -> None:
         self.store = store
         self.bootstrap_servers = bootstrap_servers
         self.group_id = group_id
+        # None (every test, and any run without RISK_ENGINE_URL/ALERT_SERVICE_URL set)
+        # keeps the pre-F3 behaviour exactly: consume and window, nothing else.
+        self.escalation = escalation
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         self._thread = threading.Thread(
             target=_consume_forever,
-            args=(self.store, self.bootstrap_servers, self._stop_event, self.group_id),
+            args=(
+                self.store,
+                self.bootstrap_servers,
+                self._stop_event,
+                self.group_id,
+                self.escalation,
+            ),
             name="stream-processor-kafka-consumer",
             daemon=True,
         )

@@ -101,6 +101,19 @@ CHANNELS: dict[str, Channel] = {
     "eda": Channel(
         code="eda", code_system=LOCAL_CODE_SYSTEM, display="Electrodermal activity", unit="uS"
     ),
+    # Wrist skin temperature is NOT body temperature and must not share its code.
+    # The Empatica E4's TEMP channel reads 31.5-33.9 degC on a healthy wrist; NEWS2's
+    # temperature component expects a core measurement and scores <=35 degC as a red
+    # flag, so mapping this onto "temp_c" made every wearable subject raise a
+    # hypothermia alert. Found once finding F3's escalation loop let a wearable replay
+    # actually reach the scoring engine -- before that, the wearable path never met
+    # NEWS2 at all. Registered device-native so no scorer can mistake it for core.
+    "temp_skin": Channel(
+        code="temp_skin",
+        code_system=LOCAL_CODE_SYSTEM,
+        display="Skin temperature (wrist)",
+        unit="Cel",
+    ),
     "ibi": Channel(
         code="ibi", code_system=LOCAL_CODE_SYSTEM, display="Inter-beat interval", unit="s"
     ),

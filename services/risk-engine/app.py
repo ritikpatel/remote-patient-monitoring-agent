@@ -154,6 +154,124 @@ def _explain(hr, rr, spo2, sbp, temp_c, gcs_total, fio2) -> list[str]:
     return reasons
 
 
+class LiveVitals(BaseModel):
+    """The vitals a streaming consumer actually has: whatever channels have arrived
+    for this patient, plus optional trajectory/medication context it may know."""
+
+    hr: float | None = None
+    rr: float | None = None
+    spo2: float | None = None
+    sbp: float | None = None
+    temp_c: float | None = None
+    gcs_total: float | None = None
+    fio2: float | None = None
+    # Trajectory context for NEWS2's third escalation limb. A stream consumer has a
+    # rolling window and can supply the recent best GCS; it generally has no
+    # medication feed, so `sedated` is genuinely unknown rather than false.
+    gcs_prev_max: float | None = None
+    sedated: bool | None = None
+
+
+class LiveScoreRequest(BaseModel):
+    patient_ref: str
+    vitals: LiveVitals
+
+
+class LiveScoreResponse(BaseModel):
+    patient_ref: str
+    news2: int
+    components_available: int
+    news2_tier_ward: str
+    news2_tier_icu: str
+    max_component: int
+    max_component_nongcs: int
+    red_params: list[str]
+    gcs_drop: bool
+    sedation_status_known: bool
+    escalation_recommended: bool
+    escalation_reason: str
+    reason: list[str]
+
+
+@app.post("/score/live", response_model=LiveScoreResponse)
+def score_live(req: LiveScoreRequest) -> LiveScoreResponse:
+    """Score an observation as it streams, with no warehouse row to look up.
+
+    ``/score/{stay_id}/{hour}`` is a lookup against the precomputed hourly grid, which
+    only exists for the 140 ICU stays already in the warehouse. A live producer -- a
+    replay driving ingest-gateway, or a wearable that has no ``stay_id`` at all -- has
+    vitals and nothing else, so before F3 there was no way to score the stream. This
+    applies exactly the same component scoring, the same persisted ICU-recalibrated
+    cut-points, and the same ``should_escalate`` predicate as the batch path.
+
+    Sedation caveat: NEWS2's GCS-drop limb is suppressed by concurrent sedation
+    (warehouse/news2.py), but a stream carries no medication feed. When ``sedated`` is
+    not supplied the limb still fires -- escalating a possibly-sedated patient is the
+    safer error than silently suppressing a real neurological deterioration -- and
+    ``sedation_status_known`` is False so a consumer can see it was a guess.
+    """
+    import pandas as pd
+    from warehouse.news2 import (
+        GCS_DROP_POINTS,
+        escalation_reason,
+        load_thresholds,
+        news2_row,
+        red_flags,
+        should_escalate,
+        tier_for_score,
+    )
+
+    v = req.vitals
+    row = pd.Series(
+        {
+            "hr": v.hr,
+            "rr": v.rr,
+            "spo2": v.spo2,
+            "sbp": v.sbp,
+            "temp_c": v.temp_c,
+            "gcs_total": v.gcs_total,
+            "fio2": v.fio2,
+        }
+    )
+    scored = news2_row(row)
+    flags = red_flags(row)
+
+    gcs_drop = False
+    if v.gcs_total is not None and v.gcs_prev_max is not None:
+        fell = (v.gcs_prev_max - v.gcs_total) >= GCS_DROP_POINTS
+        gcs_drop = bool(fell and not bool(v.sedated))
+
+    conn = get_conn()
+    try:
+        thresholds = load_thresholds(conn)
+    finally:
+        conn.close()
+
+    news2 = int(scored["news2"])
+    tier_icu = tier_for_score(news2, thresholds.icu_medium, thresholds.icu_high)
+    max_nongcs = int(flags["max_component_nongcs"])
+    red_params = str(flags["red_params"])
+    reason = escalation_reason(tier_icu, max_nongcs, red_params, gcs_drop)
+    if gcs_drop and v.sedated is None:
+        reason += " (sedation status unknown to the stream)"
+
+    return LiveScoreResponse(
+        patient_ref=req.patient_ref,
+        news2=news2,
+        components_available=int(scored["components"]),
+        news2_tier_ward=tier_for_score(news2, thresholds.ward_medium, thresholds.ward_high),
+        news2_tier_icu=tier_icu,
+        max_component=int(flags["max_component"]),
+        max_component_nongcs=max_nongcs,
+        red_params=[p for p in red_params.split(",") if p],
+        gcs_drop=gcs_drop,
+        sedation_status_known=v.sedated is not None,
+        escalation_recommended=should_escalate(tier_icu, max_nongcs, gcs_drop),
+        escalation_reason=reason,
+        reason=_explain(v.hr, v.rr, v.spo2, v.sbp, v.temp_c, v.gcs_total, v.fio2),
+    )
+
+
 class PatientSummary(BaseModel):
     stay_id: int
     patient_ref: str

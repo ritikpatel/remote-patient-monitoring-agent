@@ -66,6 +66,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
@@ -285,6 +286,42 @@ def escalation_reason(
     return " AND ".join(limbs)
 
 
+@dataclass(frozen=True)
+class Thresholds:
+    """The aggregate cut-points that turn a NEWS2 score into a tier.
+
+    These are derived from this cohort's own score distribution at build time (E5),
+    which means anything scoring a *live* observation has to read them rather than
+    recompute them -- otherwise the streaming path and the warehouse path silently
+    disagree about what "high" means. Before F3 they existed only as two local
+    variables in main() and two numbers in news2_report.md, so live scoring was not
+    expressible at all.
+    """
+
+    ward_medium: int
+    ward_high: int
+    icu_medium: int
+    icu_high: int
+
+
+def load_thresholds(conn: duckdb.DuckDBPyConnection) -> Thresholds:
+    row = conn.execute(
+        "SELECT ward_medium, ward_high, icu_medium, icu_high FROM capstone.news2_thresholds"
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("capstone.news2_thresholds is empty -- run warehouse/news2.py")
+    return Thresholds(*(int(v) for v in row))
+
+
+def tier_for_score(score: int, medium: int, high: int) -> str:
+    """Scalar counterpart of ``tier()`` for scoring one live observation."""
+    if score >= high:
+        return "high"
+    if score >= medium:
+        return "medium"
+    return "low"
+
+
 def sedation_intervals(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     """stay_id + start/end of every sedative or analgesic administration."""
     placeholders = ",".join(str(i) for i in SEDATION_ITEMIDS)
@@ -411,6 +448,12 @@ def main() -> int:
     print(f"Red GCS by level only (sedated and/or stable): {gcs_level_only:,} hours")
 
     conn.execute("CREATE SCHEMA IF NOT EXISTS capstone")
+    conn.execute("DROP TABLE IF EXISTS capstone.news2_thresholds")
+    conn.execute(
+        "CREATE TABLE capstone.news2_thresholds AS SELECT "
+        f"{WARD_MEDIUM} AS ward_medium, {WARD_HIGH} AS ward_high, "
+        f"{icu_medium} AS icu_medium, {icu_high} AS icu_high"
+    )
     conn.execute("DROP TABLE IF EXISTS capstone.news2")
     conn.register("news2_df", grid)
     conn.execute("CREATE TABLE capstone.news2 AS SELECT * FROM news2_df")

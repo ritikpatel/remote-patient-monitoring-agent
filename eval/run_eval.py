@@ -129,6 +129,11 @@ def run_rag_agent_axis(conn: duckdb.DuckDBPyConnection, n_review: int) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-latency", action="store_true")
+    parser.add_argument(
+        "--skip-agent",
+        action="store_true",
+        help="skip axis 4 -- it needs real LLM calls, and a daily token quota can run out",
+    )
     parser.add_argument("--n-review", type=int, default=50)
     args = parser.parse_args()
 
@@ -138,7 +143,15 @@ def main() -> int:
     prediction_section, predictions = run_prediction_axis(conn)
     alerting_section = run_alerting_axis(conn, predictions)
     latency_section = run_latency_axis(args.skip_latency)
-    rag_agent_section = run_rag_agent_axis(conn, args.n_review)
+    rag_agent_section = (
+        '<h2 id="rag_agent">4. RAG and agent</h2>'
+        "<p>Skipped for this run (<code>--skip-agent</code>). This axis makes real LLM "
+        "calls; a run that cannot make them would otherwise abort the whole report and "
+        "leave the previous, now-superseded one on disk -- which is exactly how a stale "
+        "report survived a model change here once.</p>"
+        if args.skip_agent
+        else run_rag_agent_axis(conn, args.n_review)
+    )
 
     html_doc = report.render_report(
         {

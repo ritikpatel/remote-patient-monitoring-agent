@@ -137,8 +137,12 @@ def score_one(conn: duckdb.DuckDBPyConnection, stay_id: int, hour: int) -> dict:
     model, manifest = load_promoted_model()
     feature_columns = manifest["feature_columns"]
     x = _feature_row(conn, stay_id, hour, feature_columns).copy()
+    # Tolerate a manifest listing a column the model no longer uses: the promoted
+    # feature set can change (finding F4 dropped `gender`), and a stale entry here
+    # should not crash serving.
     for col in manifest["categorical_columns"]:
-        x[col] = x[col].astype("category")
+        if col in x.columns:
+            x[col] = x[col].astype("category")
 
     proba = float(model.predict_proba(x)[:, 1][0])
 

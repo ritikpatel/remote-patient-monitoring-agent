@@ -42,7 +42,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import shap  # noqa: E402
 
-from ml.evaluation import metrics  # noqa: E402
+from ml.evaluation import fairness, metrics  # noqa: E402
 from ml.features import ecg, engineer, labels  # noqa: E402
 from ml.models import baselines, gbm, gru, logistic, splits  # noqa: E402
 
@@ -247,6 +247,7 @@ def main() -> int:
     all_fold_results = []
     report_sections = []
     promoted_candidate = None  # (name, horizon, model_obj, feature_columns, auprc_point)
+    fairness_result: dict | None = None  # populated on the primary horizon (F4)
 
     for horizon in HORIZONS:
         label_col = f"label_{horizon}h"
@@ -410,6 +411,48 @@ def main() -> int:
             # dead code -- this tuple used to carry both, unused.
             promoted_candidate = (best_variant, best_summary["auprc_point"])
 
+            # ---- Fairness audit (finding F4) -------------------------------
+            # Two questions, both answered on the primary horizon's best model:
+            # does `gender` earn its place, and does one shared alert threshold land
+            # equally on each subgroup? The ablation refits the same model on the
+            # same folds with the column added back, so the comparison is
+            # like-for-like with the headline number rather than a separate run.
+            print("\n  Fairness audit (F4)...")
+            x_demo, y_demo, groups_demo = engineer.feature_matrix_for_training(
+                features,
+                lab,
+                label_col,
+                include_ecg=ecg_attached if "ecg" in best_variant else None,
+                include_demographics=True,
+            )
+            fold_with, _, _, _ = run_cv_for_model(
+                f"{best_variant}+gender",
+                gbm_fit_predict,
+                x_demo,
+                y_demo,
+                groups_demo,
+                n_repeats=n_repeats,
+            )
+            fold_without = results_this_horizon[best_variant][0]
+            ablation = fairness.run_ablation(fold_with, fold_without)
+            print(
+                f"    gender ablation: AUPRC {ablation.with_demographics_auprc:.4f} with vs "
+                f"{ablation.without_demographics_auprc:.4f} without "
+                f"({ablation.repeats_where_with_is_better}/{ablation.n_repeats} repeats) "
+                f"-> earns its place: {ablation.demographics_earn_their_place}"
+            )
+            _, best_true, best_score, _, _ = results_this_horizon[best_variant]
+            subgroups = fairness.subgroup_frame(x_demo)
+            # Alert at the same operating point the alerting axis uses: the top decile
+            # of scores. One threshold, applied to every subgroup, on purpose.
+            threshold = float(np.nanquantile(best_score, 0.90))
+            subgroup_table = fairness.subgroup_metrics(best_true, best_score, subgroups, threshold)
+            fairness_result = {
+                "ablation": ablation,
+                "threshold": threshold,
+                "table": subgroup_table,
+            }
+
     # ----------------------------------------------------------------
     # SHAP attribution + model promotion (primary horizon's best model)
     # ----------------------------------------------------------------
@@ -445,7 +488,7 @@ def main() -> int:
                 "model_name": best_name,
                 "horizon_h": PRIMARY_HORIZON,
                 "feature_columns": list(x_final_cat.columns),
-                "categorical_columns": gbm.CATEGORICAL_COLUMNS,
+                "categorical_columns": gbm._present_categoricals(x_final),
                 "cv_auprc_point_estimate": best_auprc,
                 "top_shap_features": top_shap.to_dict(),
             },
@@ -465,7 +508,15 @@ def main() -> int:
     print(f"\nPromoted '{best_name}' (horizon={PRIMARY_HORIZON}h) to the MLflow model registry")
     print(f"Also exported to {PROMOTED_MODEL_DIR} for risk-engine to load directly")
 
-    write_report(all_summaries, report_sections, primary_wins, primary_total, top_shap, args.quick)
+    write_report(
+        all_summaries,
+        report_sections,
+        primary_wins,
+        primary_total,
+        top_shap,
+        args.quick,
+        fairness_result,
+    )
     print(f"\nWrote {REPORT_PATH.relative_to(REPO_ROOT)}")
 
     if args.quick:
@@ -491,6 +542,7 @@ def write_report(
     primary_total: int,
     top_shap: pd.Series,
     is_quick: bool,
+    fairness_result: dict | None = None,
 ) -> None:
     summary_df = pd.DataFrame(all_summaries)
     lines = ["# Phase 5 -- predictive models: results\n"]
@@ -518,6 +570,70 @@ def write_report(
         table = summary_df[summary_df.horizon == h].drop(columns=["horizon"])
         lines.append(table.to_markdown(index=False, floatfmt=".4f"))
         lines.append("")
+
+    if fairness_result is not None:
+        ab = fairness_result["ablation"]
+        lines.append("\n## Fairness audit (review finding F4)\n")
+        lines.append(
+            "`gender` used to rank third by mean |SHAP|, above most vitals, with no "
+            "subgroup analysis anywhere in the project. In this cohort the association "
+            "is real -- 66.2% of male ICU stays reach a composite event against 42.9% "
+            "of female (Fisher OR 2.62, p=0.007) -- but that is a 100-patient sample, "
+            "and an effect that size in 140 stays is what sampling noise looks like.\n"
+        )
+        lines.append(
+            f"**Ablation** (same model, same folds, {ab.n_repeats} repeats): AUPRC "
+            f"**{ab.with_demographics_auprc:.4f}** with `gender` against "
+            f"**{ab.without_demographics_auprc:.4f}** without "
+            f"({ab.delta:+.4f}), winning in only "
+            f"**{ab.repeats_where_with_is_better}/{ab.n_repeats}** repeats.\n"
+        )
+        lines.append(
+            f"Decision: **{'kept' if ab.demographics_earn_their_place else 'dropped'}**. "
+            + (
+                ""
+                if ab.demographics_earn_their_place
+                else "A delta this far inside the bootstrap CI, winning barely more often "
+                "than a coin flip, does not justify carrying a protected attribute into "
+                "a clinical model. `gender` is excluded from the feature set "
+                "(`engineer.feature_matrix_for_training(include_demographics=False)`, the "
+                "default); age and first care unit are kept, being a validated severity "
+                "covariate and clinical context respectively, not proxies.\n"
+            )
+        )
+        lines.append(
+            f"\n**Subgroup performance** at a single shared alert threshold "
+            f"(top decile of scores, p={fairness_result['threshold']:.3f}). One "
+            f"threshold applied to every subgroup on purpose: a model can be equally "
+            f"accurate overall and still distribute its errors unequally. Subgroups "
+            f"below {fairness.MIN_SUBGROUP_ROWS} rows or "
+            f"{fairness.MIN_SUBGROUP_POSITIVES} positives are marked underpowered and "
+            f"their metrics withheld rather than reported as numbers nobody should act on.\n"
+        )
+        lines.append(fairness_result["table"].to_markdown(index=False, floatfmt=".4f"))
+        lines.append("")
+        concerns = fairness.subgroups_of_concern(fairness_result["table"])
+        if len(concerns):
+            lines.append(
+                f"\n**Subgroups of concern** -- adequately powered, but AUROC below "
+                f"{fairness.CONCERN_AUROC:.2f}. These are the audit's actual output: the "
+                f"headline AUROC is an average, and an average hides a subgroup the model "
+                f"cannot rank at all. An AUROC at or below 0.5 is worse than chance for "
+                f"that population, and a shared alert threshold applied to it is not "
+                f"merely uninformative but actively misleading.\n"
+            )
+            lines.append(
+                concerns[
+                    ["dimension", "subgroup", "n_rows", "n_positives", "auroc", "auprc"]
+                ].to_markdown(index=False, floatfmt=".4f")
+            )
+            lines.append(
+                "\nNot fixed here, and not papered over: with 120 positives spread across "
+                "nine care units, per-subgroup remediation would be fitting to noise. The "
+                "honest statement is that this model should not be deployed to a subgroup "
+                "it cannot rank, and that identifying which ones those are is what this "
+                "audit is for.\n"
+            )
 
     lines.append("\n## Verification (PROJECT_PLAN.md section 15)\n")
     if is_quick:

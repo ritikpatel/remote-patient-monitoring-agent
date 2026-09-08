@@ -26,11 +26,38 @@ def test_session_index_finds_both_fault_fixtures():
 
 
 def test_f07_flags_bvp_and_temp_but_not_eda():
+    """f07's protection dock was never removed, covering the PPG and TEMPERATURE
+    sensors (data_constraints.txt). The channel is `temp_skin`, not `temp_c`: E4 TEMP
+    is wrist skin temperature and conflating it with core body temperature made every
+    wearable session raise a false hypothermia alert once F3's escalation loop let the
+    wearable path reach NEWS2.
+    """
     session = find_session(DEFAULT_ROOT, "STRESS", "f07")
-    channels = load_session(session, DEFAULT_ROOT, ["bvp", "temp_c", "eda"])
+    channels = load_session(session, DEFAULT_ROOT, ["bvp", "temp_skin", "eda"])
     assert all("device_fault" in [f.value for f in fl] for fl in channels["bvp"].quality_flags)
-    assert all("device_fault" in [f.value for f in fl] for fl in channels["temp_c"].quality_flags)
+    assert all(
+        "device_fault" in [f.value for f in fl] for fl in channels["temp_skin"].quality_flags
+    )
     assert not any(fl for fl in channels["eda"].quality_flags)
+
+
+def test_skin_temperature_is_not_scored_as_core_body_temperature():
+    """Regression guard for the false-hypothermia bug. A healthy wrist reads ~31-34 degC,
+    which NEWS2's temperature component scores as 3 (<=35 degC) -- so `temp_skin` must
+    stay device-native and out of the scoring channel set."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(
+        0, str(Path(__file__).resolve().parent.parent.parent / "services" / "stream-processor")
+    )
+    from escalation import SCORING_CHANNELS
+    from services.contracts.observation import CHANNELS, LOCAL_CODE_SYSTEM
+
+    assert CHANNELS["temp_skin"].code_system == LOCAL_CODE_SYSTEM
+    assert CHANNELS["temp_skin"].code != CHANNELS["temp_c"].code
+    assert "temp_skin" not in SCORING_CHANNELS
+    assert "temp_c" in SCORING_CHANNELS
 
 
 def test_s02_duplicate_flag_starts_at_documented_row():

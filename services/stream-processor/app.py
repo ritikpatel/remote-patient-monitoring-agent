@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from escalation import EscalationLoop  # noqa: E402
 from kafka_consumer import KafkaConsumerThread, WindowStore  # noqa: E402
 from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 from windowing import (  # noqa: E402
@@ -31,6 +32,24 @@ from windowing import (  # noqa: E402
 
 window_store = WindowStore()
 _consumer_thread: KafkaConsumerThread | None = None
+_escalation: EscalationLoop | None = None
+
+
+def _build_escalation_loop() -> EscalationLoop | None:
+    """Finding F3: closes stream -> score -> alert when both downstream services are
+    configured. Unset (every test, and any standalone run) keeps the pre-F3 behaviour
+    -- consume and window, nothing else -- exactly as KAFKA_BOOTSTRAP_SERVERS already
+    gates the consumer itself. Infra presence turns it on, never a code change.
+    """
+    risk_url = os.environ.get("RISK_ENGINE_URL")
+    alert_url = os.environ.get("ALERT_SERVICE_URL")
+    if not (risk_url and alert_url):
+        return None
+    return EscalationLoop(
+        risk_engine_url=risk_url,
+        alert_service_url=alert_url,
+        notification_url=os.environ.get("NOTIFICATION_GATEWAY_URL"),
+    )
 
 
 @asynccontextmanager
@@ -41,19 +60,43 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     Mirrors ingest-gateway's `PUBLISHER_BACKEND` switch: infra presence is the
     only thing that turns this on, never a code change.
     """
-    global _consumer_thread
+    global _consumer_thread, _escalation
     bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS")
     if bootstrap:
-        _consumer_thread = KafkaConsumerThread(window_store, bootstrap)
+        _escalation = _build_escalation_loop()
+        _consumer_thread = KafkaConsumerThread(window_store, bootstrap, escalation=_escalation)
         _consumer_thread.start()
     yield
     if _consumer_thread is not None:
         _consumer_thread.stop()
+    if _escalation is not None:
+        _escalation.close()
 
 
 app = FastAPI(title="stream-processor", version="0.1.0", lifespan=_lifespan)
 instrument_metrics(app)
 instrument_tracing(app, "stream-processor")
+
+
+@app.get("/escalation/stats")
+def escalation_stats() -> dict:
+    """Observability for the F3 loop. Without this the only way to tell a silent
+    escalation loop from a genuinely quiet stream was to read the process log --
+    which is exactly how the wall-clock-throttle bug hid: 336 observations went in,
+    one was scored, and nothing anywhere said so.
+    """
+    if _escalation is None:
+        return {
+            "enabled": False,
+            "reason": "RISK_ENGINE_URL and ALERT_SERVICE_URL are not both set",
+        }
+    return {
+        "enabled": True,
+        "scored": _escalation.scored,
+        "escalated": _escalation.escalated,
+        "alerts_raised": _escalation.alerts_raised,
+        "errors": _escalation.errors,
+    }
 
 
 @app.get("/health")

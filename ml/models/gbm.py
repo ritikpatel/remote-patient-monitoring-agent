@@ -17,10 +17,24 @@ import pandas as pd
 CATEGORICAL_COLUMNS = ["gender", "first_careunit"]
 
 
+def _present_categoricals(x: pd.DataFrame) -> list[str]:
+    """LightGBM rejects a categorical_feature name that is not in the frame, so the
+    list must follow the actual columns rather than the module constant."""
+    return [c for c in CATEGORICAL_COLUMNS if c in x.columns]
+
+
 def _as_categorical(x: pd.DataFrame) -> pd.DataFrame:
+    """Casts the known categorical columns, tolerating any that are absent.
+
+    A hard KeyError here meant the model could not be fitted on a feature matrix with
+    a categorical column removed -- which is exactly what a demographic ablation does
+    (ml/evaluation/fairness.py, finding F4). An optional feature should not be a
+    structural requirement of the estimator.
+    """
     x = x.copy()
     for col in CATEGORICAL_COLUMNS:
-        x[col] = x[col].astype("category")
+        if col in x.columns:
+            x[col] = x[col].astype("category")
     return x
 
 
@@ -55,6 +69,6 @@ def fit_predict_proba(
     scale_pos_weight = negatives / positives if positives else 1.0
 
     model = build_model(scale_pos_weight)
-    model.fit(x_train, y_train, categorical_feature=CATEGORICAL_COLUMNS)
+    model.fit(x_train, y_train, categorical_feature=_present_categoricals(x_train))
     proba = np.asarray(model.predict_proba(x_test))[:, 1]
     return model, proba

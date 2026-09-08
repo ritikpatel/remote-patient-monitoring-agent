@@ -49,7 +49,7 @@ from simulators.arrival_models import (  # noqa: E402
 from simulators.arrival_models import (  # noqa: E402
     ArrivalModelSet,
 )
-from simulators.sinks import Sink, make_sink  # noqa: E402
+from simulators.sinks import DEFAULT_INGEST_API_KEY, Sink, make_sink  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "warehouse" / "mimic4_demo.db"
@@ -129,7 +129,17 @@ def main() -> int:
     ap.add_argument(
         "--compress", type=float, default=3600.0, help="simulated seconds per wall-clock second"
     )
-    ap.add_argument("--sink", choices=["console", "jsonl"], default="console")
+    ap.add_argument("--sink", choices=["console", "jsonl", "http"], default="console")
+    ap.add_argument(
+        "--gateway-url",
+        default="http://localhost:8000",
+        help="ingest-gateway base URL for --sink http",
+    )
+    ap.add_argument(
+        "--api-key",
+        default=DEFAULT_INGEST_API_KEY,
+        help="X-API-Key for --sink http",
+    )
     ap.add_argument("--out", type=Path, default=Path("icu_replay.jsonl"))
     ap.add_argument(
         "--no-sleep",
@@ -165,7 +175,7 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    sink: Sink = make_sink(args.sink, args.out)
+    sink: Sink = make_sink(args.sink, args.out, gateway_url=args.gateway_url, api_key=args.api_key)
     try:
         replay(observations, sink, compress=args.compress, sleep=not args.no_sleep)
     finally:

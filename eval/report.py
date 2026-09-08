@@ -108,12 +108,12 @@ def _line_chart_svg(
             f"fill='{color}'>{_esc(name)}</text>"
         )
     parts.append(
-        f"<text x='{width/2}' y='{height - 6}' font-size='11' text-anchor='middle' "
+        f"<text x='{width / 2}' y='{height - 6}' font-size='11' text-anchor='middle' "
         f"fill='#555'>{_esc(x_label)}</text>"
     )
     parts.append(
-        f"<text x='12' y='{height/2}' font-size='11' fill='#555' "
-        f"transform='rotate(-90 12 {height/2})' text-anchor='middle'>{_esc(y_label)}</text>"
+        f"<text x='12' y='{height / 2}' font-size='11' fill='#555' "
+        f"transform='rotate(-90 12 {height / 2})' text-anchor='middle'>{_esc(y_label)}</text>"
     )
     parts.append("</svg>")
     return "\n".join(parts)
@@ -172,6 +172,14 @@ def render_prediction_section(summary: dict, horizon: int) -> str:
     ordinal scores, not probabilities, and are excluded here for the same reason
     Phase 5 excluded them from Brier score.</p>
     {calib_svg}
+    <div class="notice"><strong>Subgroup performance and the demographic-feature
+    question</strong> are audited in Phase 5's own report
+    (<code>ml/evaluation/report.md</code>, "Fairness audit"), which is where the model
+    lives. Two results worth carrying here: <code>gender</code> was dropped after a
+    20-repeat ablation showed it won in only 13/20 repeats, and the audit found
+    adequately-powered care-unit subgroups the model ranks at or below chance. The
+    AUROC/AUPRC on this page are cohort averages and do not show that.</div>
+
     <h3>Decision-curve analysis (lightgbm_ecg)</h3>
     <p class="muted">Net benefit of acting on the model at each threshold probability,
     against "treat everyone" and "treat no one". The model is only useful where its
@@ -194,7 +202,7 @@ def render_alerting_section(
 ) -> str:
     sens_rows = []
     budgets = sorted({b for m in sensitivity_by_budget.values() for b in m})
-    header = "".join(f"<th>{int(b*100)}% budget</th>" for b in budgets)
+    header = "".join(f"<th>{int(b * 100)}% budget</th>" for b in budgets)
     for name, by_budget in sensitivity_by_budget.items():
         cells = "".join(f"<td>{_fmt(by_budget.get(b))}</td>" for b in budgets)
         sens_rows.append(f"<tr><td>{_esc(name)}</td>{cells}</tr>")
@@ -342,10 +350,15 @@ def render_rag_agent_section(
           <td>${_fmt(cost_result.projected_cost_per_patient_day_usd, 4)}</td></tr>
     </tbody></table>
     <div class="notice">Escalation agreement is 100% by construction --
-    EscalationDecider computes <code>escalate</code> from the ICU-recalibrated tier
-    alone, before the LLM is ever consulted (Phase 4's constraint 2). Reported here
-    at corpus scale to confirm that holds in practice, not as a metric the agent
-    could plausibly fail.</div>
+    EscalationDecider computes <code>escalate</code> from
+    <code>warehouse.news2.should_escalate</code> (all three NEWS2 limbs: aggregate
+    tier, single red non-GCS parameter, and a falling GCS off sedation) before the LLM
+    is ever consulted (Phase 4's constraint 2). Reported here at corpus scale to
+    confirm that holds in practice, not as a metric the agent could plausibly fail.
+    Note that this metric read 100% while the policy was in fact dropping one of
+    NEWS2's triggers, because it held its own hand-copied reference implementation of
+    the rule -- both copies were wrong in the same direction (finding F1). It now
+    imports the predicate rather than restating it.</div>
     <div class="notice">LLM cost uses Groq's real published rate for
     openai/gpt-oss-120b ($0.60/1M tokens, the more expensive output rate, applied to
     the combined input+output total as a deliberate upper bound) -- the model this

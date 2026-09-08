@@ -54,7 +54,7 @@ from services.contracts.observation import (  # noqa: E402
     QualityFlag,
 )
 
-from simulators.sinks import Sink, make_sink  # noqa: E402
+from simulators.sinks import DEFAULT_INGEST_API_KEY, Sink, make_sink  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ROOT = (
@@ -71,21 +71,24 @@ ACTIVITIES = ["STRESS", "AEROBIC", "ANAEROBIC"]
 FIXED_RATE_FILES: dict[str, tuple[str, int]] = {
     "bvp": ("BVP.csv", 1),
     "eda": ("EDA.csv", 1),
-    "temp_c": ("TEMP.csv", 1),
+    # E4 TEMP is wrist SKIN temperature, not core body temperature -- see the
+    # temp_skin entry in services/contracts/observation.py for why conflating the two
+    # made every wearable session raise a false hypothermia alert.
+    "temp_skin": ("TEMP.csv", 1),
     "hr": ("HR.csv", 1),
     "acc": ("ACC.csv", 3),
 }
 
 # data_constraints.txt, applied exactly as documented -- see module docstring.
 INVALID_CHANNELS: dict[tuple[str, str], set[str]] = {
-    ("STRESS", "f07"): {"bvp", "temp_c"},
+    ("STRESS", "f07"): {"bvp", "temp_skin"},
 }
 # "Duplicated raw values start in: ACC.csv: row 49,545; BVP.csv: row 99,091;
 # EDA.csv and TEMP.csv: row 6,195." Read as the 1-indexed line number in the raw
 # file (including the two header lines) -- converted to a 0-indexed sample position
 # by subtracting 2 in _load_fixed_rate_channel.
 DUPLICATE_START_LINE: dict[tuple[str, str], dict[str, int]] = {
-    ("STRESS", "S02"): {"acc": 49_545, "bvp": 99_091, "eda": 6_195, "temp_c": 6_195},
+    ("STRESS", "S02"): {"acc": 49_545, "bvp": 99_091, "eda": 6_195, "temp_skin": 6_195},
 }
 
 SPLIT_PATTERN = re.compile(r"^(.+)_([ab])$")
@@ -204,7 +207,7 @@ def load_session(
     duplicate-block flags. Returns one ChannelSamples per requested channel
     (acc expands to acc_x/acc_y/acc_z).
     """
-    wanted = channels or ["bvp", "acc", "eda", "temp_c", "hr"]
+    wanted = channels or ["bvp", "acc", "eda", "temp_skin", "hr"]
     per_channel: dict[str, list[ChannelSamples]] = {}
 
     for part in session.parts:
@@ -292,11 +295,21 @@ def main() -> int:
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     ap.add_argument("--activity", choices=ACTIVITIES)
     ap.add_argument("--participant")
-    ap.add_argument("--channels", default="bvp,acc,eda,temp_c,hr")
+    ap.add_argument("--channels", default="bvp,acc,eda,temp_skin,hr")
     ap.add_argument("--start-offset-s", type=float, default=0.0)
     ap.add_argument("--duration-s", type=float, default=30.0, help="0 = whole session")
     ap.add_argument("--compress", type=float, default=1.0, help="1.0 = true device rate")
-    ap.add_argument("--sink", choices=["console", "jsonl"], default="console")
+    ap.add_argument("--sink", choices=["console", "jsonl", "http"], default="console")
+    ap.add_argument(
+        "--gateway-url",
+        default="http://localhost:8000",
+        help="ingest-gateway base URL for --sink http",
+    )
+    ap.add_argument(
+        "--api-key",
+        default=DEFAULT_INGEST_API_KEY,
+        help="X-API-Key for --sink http",
+    )
     ap.add_argument("--out", type=Path, default=Path("wearable_replay.jsonl"))
     ap.add_argument("--no-sleep", action="store_true")
     ap.add_argument("--list", action="store_true", help="list available sessions and exit")
@@ -329,7 +342,7 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    sink = make_sink(args.sink, args.out)
+    sink = make_sink(args.sink, args.out, gateway_url=args.gateway_url, api_key=args.api_key)
     try:
         replay(observations, sink, compress=args.compress, sleep=not args.no_sleep)
     finally:

@@ -24,6 +24,12 @@ architecture.
 > MedicationAdministration), both fixed. Suite is now **309 passed, 3 skipped**. F3 and F4 remain
 > open. Details in each finding below.
 
+> **Update 2026-09-08 (later) — F3 and F4 are also fixed and verified.** All four findings are
+> now closed. Fixing F3 exposed a further defect (wearable skin temperature scored as core body
+> temperature, which would have raised a false hypothermia alert for every wearable subject) and
+> F4's audit found care-unit subgroups the model ranks at or below chance. Suite is **317 passed,
+> 6 skipped**. See the second appendix.
+
 **9 of 11 deliverables verified end-to-end by me. 2 are overstated** — deliverable 1 and
 deliverable 5 pass in substance but fail their acceptance tests exactly as written.
 
@@ -121,7 +127,7 @@ POST /fhir  (transaction Bundle, PUT Patient?identifier=…|10006053, PUT Encoun
 The mapper already emits the right business identifiers, so this is a contained change to
 `hapi_client.py`.
 
-### F3 — Replay simulators cannot drive the live pipeline *(medium)* — open
+### F3 — Replay simulators cannot drive the live pipeline *(medium)* — **FIXED**
 
 `simulators/sinks.py` implements `ConsoleSink` and `JSONLSink` only. Line 6 acknowledges an
 ingest-gateway sink "becomes a third Sink" — planned, never built. `grep` confirms nothing in
@@ -134,7 +140,7 @@ Deliverable 1's acceptance test — "both replays raise alerts through one engin
 **not demonstrable as written**, and it is marked ✅ in the README. This is the single biggest gap
 between claimed and demonstrable, and it is roughly a 30-line `HTTPSink`.
 
-### F4 — No fairness analysis, and `gender` is the #3 SHAP feature *(medium)* — open
+### F4 — No fairness analysis, and `gender` is the #3 SHAP feature *(medium)* — **FIXED**
 
 `gender` ranks third by mean |SHAP| in the promoted model, above most vitals. In this cohort the
 association is statistically real — 66.2% of male stays have an event vs 42.9% of female
@@ -265,3 +271,99 @@ analysis, `gender` ranks #3 by SHAP) are unchanged. Neither was in scope for thi
 clean; `mypy` clean on the changed modules. New regression tests pin every limb, including
 `test_the_motivating_case_now_escalates`, which names stay 34617352 hour 35 directly so this
 specific patient can never silently stop escalating again.
+
+---
+
+## Appendix 2 — how F3 and F4 were fixed (2026-09-08)
+
+### F3 — the replays now drive the live pipeline
+
+F3 was larger than the missing sink it looked like. `sinks.py` had no HTTP implementation, but
+`stream-processor` also never called anything downstream: it consumed and windowed, and stopped.
+The only thing that had ever driven the full chain was `eval/load/ramp.js`, calling each service
+itself. Four pieces were needed:
+
+| Added | Why |
+|---|---|
+| `HTTPSink` (`simulators/sinks.py`) | Batched POST to ingest-gateway; both replays gain `--sink http` |
+| `POST /score/live` (risk-engine) | `/score/{stay_id}/{hour}` is a warehouse lookup. A live producer — a replay, or a wearable with no `stay_id` at all — has vitals and nothing else |
+| `capstone.news2_thresholds` | The ICU cut-points existed only as two locals in `main()` and two numbers in a markdown report, so live scoring could not apply the recalibrated tier |
+| `EscalationLoop` (`stream-processor/escalation.py`) | Closes stream → score → alert → notify, using the same `should_escalate` predicate |
+
+It deliberately does **not** call agent-orchestrator: the agent makes LLM calls and belongs *after*
+a patient is alerting, not once per observation. Both paths share one predicate, so the cheap
+deterministic path and the expensive narrative path cannot disagree.
+
+Verified end to end against real Kafka:
+
+```
+ICU replay  (stay 34807493)  382 observations -> 49 scored -> 22 escalated -> 1 alert
+   "NEWS2 3: single-parameter red flag (RCP 2017): rr scoring 3"     <- F1's limb, live
+wearable replay (subject S05) 152,097 observations -> 0 alerts       <- healthy volunteer
+```
+
+**A bug I introduced and then found:** the first version throttled scoring by wall-clock time.
+Under `--compress 3600` (or `--no-sleep`) a 40-hour stay arrives in under a second, so everything
+after the first observation was throttled away: 336 observations in, one scored, no alert out. The
+throttle is now measured in *stream* time, which means the same thing live and at 3600×.
+`GET /escalation/stats` was added because nothing anywhere had made that silence visible.
+
+**A pre-existing bug F3 exposed:** the Empatica E4's `TEMP` channel is **wrist skin temperature**
+(31.5–33.9 °C on a healthy wrist) and was mapped onto `temp_c`, LOINC 8310-5 "Body temperature".
+NEWS2's temperature component expects a core measurement and scores ≤35 °C as a red flag, so every
+wearable subject would have raised a hypothermia alert. This was invisible before F3 because the
+wearable path never reached NEWS2. Skin temperature is now a distinct device-native channel
+(`temp_skin`) that no scorer can mistake for core, with a regression test pinning it.
+
+### F4 — `gender` dropped, subgroup audit added
+
+Two questions, answered in that order.
+
+**Does it earn its place?** A 20-repeat grouped-CV ablation, same model and same folds:
+
+| | AUPRC | Wins |
+|---|---|---|
+| with `gender` | 0.5065 | **13/20 repeats** |
+| without | 0.4953 | |
+
+A +0.011 delta inside a bootstrap CI roughly twenty times that wide, winning barely more often
+than a coin flip. **Dropped.** `include_demographics` now defaults to False. Age and first care
+unit stay — a validated severity covariate and clinical context, not proxies. The headline claim
+survives without it: LightGBM still beats recalibrated NEWS2 in **20/20** repeats.
+
+**Does one threshold land equally?** `ml/evaluation/fairness.py` reports per-subgroup AUROC/AUPRC,
+event rate and alert rate by sex, age band and care unit, at a single shared threshold. Subgroups
+below 200 rows or 10 positives are marked underpowered and their metrics withheld rather than
+printed as numbers nobody should act on. Race is excluded and said so: at n=100 most categories
+hold single-digit patient counts.
+
+It immediately found two things the cohort-average AUROC of 0.87 hides:
+
+| Subgroup | AUROC | Note |
+|---|---|---|
+| Trauma SICU | **0.469** | worse than chance — the model cannot rank this population at all |
+| Age 80+ | 0.713 | against ~0.84 in every other age band |
+
+By sex, discrimination is essentially equal (AUROC 0.863 F / 0.803 M) and the alert-rate gap
+(6.6% vs 16.6%) tracks a real in-sample event-rate difference rather than miscalibration.
+
+These are **not fixed**, and deliberately so: with 120 positives across nine care units,
+per-subgroup remediation is fitting to noise. The honest output is that this model should not be
+deployed to a subgroup it cannot rank, and naming which ones those are is what the audit is for.
+`subgroups_of_concern()` surfaces them in the report rather than leaving a reader to spot a
+below-chance AUROC in a fifteen-row table.
+
+**Three defects found while fixing F4:** `gbm._as_categorical`, `logistic.build_pipeline` and the
+promoted-model manifest all hardcoded `gender`, so no ablation could run at all — an optional
+feature was a structural requirement of three separate components. All three now follow the actual
+frame.
+
+### Verification
+
+`317 passed, 6 skipped`. `ruff`, `black` and `mypy` pre-commit hooks pass.
+
+One artefact is short of a full refresh: `eval/output/report.html` has current axis-1 and axis-2
+numbers, with axis 3 (latency) and axis 4 (RAG/agent) marked skipped — the Groq daily token quota
+(200k) was exhausted. A `--skip-agent` flag was added for exactly this, because the earlier
+behaviour was worse: the run aborted on the rate limit and left a wholly superseded report on
+disk. Re-run `python eval/run_eval.py` with quota to restore all four axes.
