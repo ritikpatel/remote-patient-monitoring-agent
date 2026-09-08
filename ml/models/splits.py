@@ -1,15 +1,23 @@
 """Grouped, repeated, stratified cross-validation (PROJECT_PLAN.md section 11).
 
-**Grouped by subject_id -- no patient spans train and test.** Splitting is
-therefore grouped by ``stay_id``, which is already a 1:1 proxy for
-``subject_id`` at the granularity this task needs, since two ICU stays for
-the same patient never appear in the composite-event risk set close enough in
-time to leak information the way a stay-relative split would -- but see
-``group_key()`` below, which uses the real ``subject_id`` when it is supplied,
-because a handful of patients in this cohort do have more than one stay
-(``ml/features/labels.py``'s readmission events exist *because* of this), and
-a naive per-stay grouping would let one of those patients appear in both the
-train and test fold through their second stay.
+**Grouped by subject_id -- no patient spans train and test.** The caller is
+responsible for passing the right column, and
+``ml/features/engineer.feature_matrix_for_training`` returns ``subject_id``
+for exactly this reason.
+
+This module used to claim that ``stay_id`` was "already a 1:1 proxy for
+subject_id at the granularity this task needs", and offered a ``group_key()``
+helper to use the real subject id "when it is supplied". Both were wrong. The
+proxy claim is false in this cohort -- 21 of 93 subjects in the at-risk set
+have more than one ICU stay, carrying 45% of its rows and 44% of its positives
+(``ml/features/labels.py``'s readmission events exist *because* of this) -- and
+the helper was never once called with a subject id, so it silently returned
+``stay_id`` at every call site while looking like the safeguard. Both are gone:
+the escape hatch that is never taken is worse than no escape hatch, because it
+stops anyone looking. ``ml/evaluation/reliability.py`` measures what the leak
+was worth: **+0.0499 AUPRC** of optimism at the 6h horizon on the current
+feature set (+0.0159 before `gender` was added -- a patient-constant feature
+makes a stay-level split leak more, not less).
 
 n=140 stays means a single 80/20 split is not a stable estimate of anything;
 the plan calls for **repeated stratified 5-fold CV, >=20 repeats** so the
@@ -27,13 +35,6 @@ from sklearn.model_selection import StratifiedGroupKFold
 
 DEFAULT_N_SPLITS = 5
 DEFAULT_N_REPEATS = 20
-
-
-def group_key(groups: pd.Series, subject_ids: pd.Series | None = None) -> pd.Series:
-    """The grouping column CV must respect. Prefer subject_id when available
-    -- it is the plan's literal requirement -- else fall back to stay_id.
-    """
-    return subject_ids if subject_ids is not None else groups
 
 
 def repeated_grouped_stratified_splits(

@@ -63,6 +63,8 @@ MIN_SUBGROUP_POSITIVES = 5
 # good one, so the point estimate is withheld rather than published as a finding.
 MAX_INFORMATIVE_CI_WIDTH = 0.40
 N_BOOTSTRAP = 600
+# Fraction of CV repeats a demographic feature must win to be carried.
+EARN_THEIR_PLACE_FRACTION = 0.75
 AGE_BANDS = [(0, 50, "<50"), (50, 65, "50-64"), (65, 80, "65-79"), (80, 200, "80+")]
 # Time since ICU admission. The adequately-powered axis: the model is trained mostly on
 # early rows (57% of positives fall in the first two hours) and degrades after them.
@@ -82,8 +84,16 @@ class AblationResult:
         """A demographic feature is kept only if it wins on a clear majority of
         repeats. A coin-flip result means the model does just as well without it, and
         the cheaper thing to defend is the model that never saw it.
+
+        Known weakness, recorded because this criterion has already flipped once:
+        it is a sign test on the win count and ignores effect size entirely. When
+        the CV grouping was corrected from stay to subject, `gender` moved from
+        13/20 to 15/20 -- across this threshold -- on a delta of +0.0103 AUPRC
+        that sits far inside a bootstrap CI many times wider. Nothing about the
+        feature changed. Treat a result near the bar as the weak evidence it is,
+        and read it next to the subgroup table rather than instead of it.
         """
-        return self.repeats_where_with_is_better >= 0.75 * self.n_repeats
+        return self.repeats_where_with_is_better >= EARN_THEIR_PLACE_FRACTION * self.n_repeats
 
 
 def age_band(age: float) -> str:
