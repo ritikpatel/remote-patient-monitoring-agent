@@ -10,6 +10,18 @@
 > clinical practice. (PROJECT_PLAN.md section 17 — this notice belongs on
 > every artefact this project produces, not just here.)
 
+> **The two arms are not equal, and the title should not imply they are.** The
+> ICU arm has real labels (120 composite events), a trained model, and a full
+> evaluation. The post-discharge arm has **no outcome labels at all** — the
+> wearable cohort is healthy volunteers with no ICU link (E10), so nothing in
+> this project links wearable telemetry to a post-discharge outcome. What the
+> post-discharge arm now has is a model trained on ICU labels but restricted to
+> *wearable-obtainable channels*
+> ([`ml/evaluation/wrist_only_report.md`](ml/evaluation/wrist_only_report.md)),
+> which is an honest proxy and explicitly not a readmission model. The gap, what
+> is fixable in code and what is a permanent data limit, is planned out in
+> [`docs/two_arm_alignment.md`](docs/two_arm_alignment.md).
+
 ## The finding that motivates this
 
 The EDA (`notebooks/01_capstone_eda.ipynb`, 71 cells, 22 figures) shows ICU
@@ -58,7 +70,8 @@ building it, and how it was verified.
 | 1 | Real-Time Patient Monitoring System | P2, P4 | Live watch + both replays raise alerts through one engine | ✅ `--sink http` + stream-processor's escalation loop; verified live (F3 fixed) |
 | 2 | Agentic AI Clinical Monitoring Engine | P4 | Agent graph produces a scored, cited escalation decision with a full audit trail | ✅ |
 | 3 | Early Warning & Alert System | P1, P4 | Recalibrated NEWS2 fires with measured lead time to event | ✅ all three NEWS2 limbs; 41.0% event coverage, 0.63h median lead (F1 fixed) |
-| 4 | Predictive Risk Modeling Module | P5 | Beats NEWS2 on AUPRC in ≥15 of 20 CV repeats | ✅ 20/20, with a subgroup fairness audit; `gender` dropped on ablation (F4 fixed) |
+| 4 | Predictive Risk Modeling Module | P5 | Beats NEWS2 on AUPRC in ≥15 of 20 CV repeats | ✅ 20/20 under patient-level CV (F6 fixed a stay-level grouping leak); subgroup fairness audit; `gender` kept on ablation (F4 reversed) |
+| 4b | …the same module, for the post-discharge arm | P5 | A model that runs on wearable-obtainable channels only | ✅ wrist-only model, AUPRC 0.269 vs the ICU model's 0.493 on 15 features instead of 67 ([report](ml/evaluation/wrist_only_report.md)) |
 | 5 | FHIR-Based Integration Layer | P4 | HAPI FHIR validates every emitted resource | ✅ all 7 mapped resource types, references resolved, against a live HAPI server (F2 fixed) |
 | 6 | RAG-Powered Clinical Summarization | P3, P4 | Every claim traces to a fact-ledger entry | ✅ |
 | 7 | Smart Hospital Connectivity Layer | P6 | Remote clinician sees live vitals and acknowledges an alert off-site | ✅ |
@@ -73,7 +86,7 @@ building it, and how it was verified.
 data/{raw,interim,processed}/   raw gitignored; symlinks to the 3 dataset folders
 notebooks/                      the completed EDA
 warehouse/                      DuckDB build + mimic-code concepts + hourly grid
-simulators/                     icu_replay, wearable_replay, morphing, arrival_models
+simulators/                     real_event_replay, wearable_replay, morphing, arrival_models
 notes_synth/                    LLM note generation + fact ledger
 ml/{features,models,evaluation}/  labels, feature engineering, models, Phase 5 report
 services/                       9 FastAPI microservices + shared common/contracts
