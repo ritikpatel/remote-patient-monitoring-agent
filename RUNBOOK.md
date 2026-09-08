@@ -21,8 +21,8 @@ aliases it to 3.13, which has no dependencies installed. Always use `.venv/bin/p
 ```bash
 .venv/bin/python -m pytest -q
 ```
-Expect **317 passed, 6 skipped**. The 12 skips are infrastructure-gated and self-detecting —
-they name exactly what is missing. This is the single best opening demo: it runs with no Docker.
+Expect **312 passed, 14 skipped** with no infra running. The skips are infrastructure-gated
+and self-detecting — they name exactly what is missing. This is the single best opening demo: it runs with no Docker.
 
 ## 2. The warehouse (already built — verify, don't rebuild)
 
@@ -60,8 +60,8 @@ docker compose -f infra/compose/docker-compose.yml ps
 ```bash
 .venv/bin/python -m pytest -q
 ```
-All infra-gated skips clear. This is a strong demo moment: the same suite, ten more tests,
-because real Kafka, Postgres, MQTT, HAPI and Keycloak are now reachable.
+Now **324 passed, 2 skipped**. This is a strong demo moment: the same suite, twelve more
+tests passing, because real Kafka, Postgres, MQTT, HAPI and Keycloak are now reachable.
 
 ## 5. Start the services
 

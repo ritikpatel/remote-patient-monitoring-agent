@@ -441,12 +441,21 @@ def main() -> int:
                 f"({ablation.repeats_where_with_is_better}/{ablation.n_repeats} repeats) "
                 f"-> earns its place: {ablation.demographics_earn_their_place}"
             )
-            _, best_true, best_score, _, _ = results_this_horizon[best_variant]
-            subgroups = fairness.subgroup_frame(x_demo)
+            _, best_true, best_score, best_groups, _ = results_this_horizon[best_variant]
+            # `hour` is a legitimate inference-time input (hours since ICU admission)
+            # and is the adequately-powered audit axis -- see fairness.py's docstring.
+            audit_hours = (
+                lab[["stay_id", "hour"]]
+                .merge(features[["stay_id", "hour"]], on=["stay_id", "hour"], how="inner")["hour"]
+                .to_numpy()
+            )
+            subgroups = fairness.subgroup_frame(x_demo, hours=audit_hours)
             # Alert at the same operating point the alerting axis uses: the top decile
             # of scores. One threshold, applied to every subgroup, on purpose.
             threshold = float(np.nanquantile(best_score, 0.90))
-            subgroup_table = fairness.subgroup_metrics(best_true, best_score, subgroups, threshold)
+            subgroup_table = fairness.subgroup_metrics(
+                best_true, best_score, subgroups, threshold, groups=best_groups
+            )
             fairness_result = {
                 "ablation": ablation,
                 "threshold": threshold,
@@ -606,33 +615,41 @@ def write_report(
             f"(top decile of scores, p={fairness_result['threshold']:.3f}). One "
             f"threshold applied to every subgroup on purpose: a model can be equally "
             f"accurate overall and still distribute its errors unequally. Subgroups "
-            f"below {fairness.MIN_SUBGROUP_ROWS} rows or "
-            f"{fairness.MIN_SUBGROUP_POSITIVES} positives are marked underpowered and "
-            f"their metrics withheld rather than reported as numbers nobody should act on.\n"
+            f"whose 95% CI is wider than {fairness.MAX_INFORMATIVE_CI_WIDTH:.2f} have their "
+            f"point estimates **withheld**: an interval that wide is consistent with a "
+            f"useless model and an excellent one at once, so publishing the midpoint "
+            f"manufactures a finding the data cannot support. The bootstrap resamples "
+            f"patients, not rows -- rows from one patient are not independent, and a "
+            f"row-level bootstrap reports a CI far narrower than the data earns.\n"
         )
         lines.append(fairness_result["table"].to_markdown(index=False, floatfmt=".4f"))
         lines.append("")
         concerns = fairness.subgroups_of_concern(fairness_result["table"])
         if len(concerns):
             lines.append(
-                f"\n**Subgroups of concern** -- adequately powered, but AUROC below "
-                f"{fairness.CONCERN_AUROC:.2f}. These are the audit's actual output: the "
-                f"headline AUROC is an average, and an average hides a subgroup the model "
-                f"cannot rank at all. An AUROC at or below 0.5 is worse than chance for "
-                f"that population, and a shared alert threshold applied to it is not "
-                f"merely uninformative but actively misleading.\n"
+                f"\n**Subgroups of concern** -- those whose CI *upper* bound is below "
+                f"{fairness.CONCERN_AUROC:.2f}, i.e. where the data can support "
+                f'"this is poor" rather than merely "this is unmeasured".\n'
             )
             lines.append(
                 concerns[
-                    ["dimension", "subgroup", "n_rows", "n_positives", "auroc", "auprc"]
-                ].to_markdown(index=False, floatfmt=".4f")
+                    [
+                        "dimension",
+                        "subgroup",
+                        "n_rows",
+                        "n_positives",
+                        "auroc",
+                        "auroc_lo",
+                        "auroc_hi",
+                    ]
+                ].to_markdown(index=False, floatfmt=".3f")
             )
             lines.append(
-                "\nNot fixed here, and not papered over: with 120 positives spread across "
-                "nine care units, per-subgroup remediation would be fitting to noise. The "
-                "honest statement is that this model should not be deployed to a subgroup "
-                "it cannot rank, and that identifying which ones those are is what this "
-                "audit is for.\n"
+                "\nNot remediated per-subgroup, deliberately: with 120 positives across "
+                "nine care units, fitting a change to a single unit is fitting to noise. "
+                "The actionable output is the model's validated **scope**, which "
+                "risk-engine now declares on every ML prediction rather than leaving a "
+                "consumer to assume the headline AUROC applies everywhere.\n"
             )
 
     lines.append("\n## Verification (PROJECT_PLAN.md section 15)\n")

@@ -133,6 +133,40 @@ def _feature_row(
     return row[feature_columns]
 
 
+# The model's validated scope, measured -- not asserted. ml/evaluation/report.md's
+# fairness audit stratifies held-out performance by hours since ICU admission and finds
+# the model discriminates well early and poorly later:
+#
+#   hour 0-5    AUROC 0.899 (0.81-0.96)   AUPRC 0.715
+#   hour 6-23   AUROC 0.668 (0.51-0.88)   AUPRC 0.074
+#   hour 24+    withheld -- CI too wide to mean anything
+#
+# 57% of the training positives fall in the first two hours, so the headline AUPRC is
+# carried almost entirely by early-stay rows. A consumer that reads only the headline
+# number will over-trust a late-stay score by a wide margin, and nothing in the payload
+# used to say so. This is the actionable output of the subgroup audit: not a per-unit
+# patch (with 120 positives across nine care units that is fitting to noise) but an
+# honest statement of where the number applies.
+VALIDATED_SCOPE_MAX_HOUR = 6
+OUT_OF_SCOPE_NOTE = (
+    "Outside the model's validated scope: held-out AUPRC falls from 0.715 in the first "
+    "6 ICU hours to 0.074 from hour 6, and is unmeasurable past hour 24. Treat this "
+    "probability as indicative only and use the deterministic NEWS2/SOFA path "
+    "(/score/{stay_id}/{hour}), which is what the alerting engine actually escalates on."
+)
+IN_SCOPE_NOTE = "Within the model's validated scope (first 6 ICU hours, held-out AUPRC 0.715)."
+
+
+def scope_for_hour(hour: int) -> dict:
+    """Whether a prediction at this hour falls inside the measured scope, and why."""
+    in_scope = hour < VALIDATED_SCOPE_MAX_HOUR
+    return {
+        "in_validated_scope": in_scope,
+        "validated_scope_max_hour": VALIDATED_SCOPE_MAX_HOUR,
+        "scope_note": IN_SCOPE_NOTE if in_scope else OUT_OF_SCOPE_NOTE,
+    }
+
+
 def score_one(conn: duckdb.DuckDBPyConnection, stay_id: int, hour: int) -> dict:
     model, manifest = load_promoted_model()
     feature_columns = manifest["feature_columns"]
@@ -163,4 +197,5 @@ def score_one(conn: duckdb.DuckDBPyConnection, stay_id: int, hour: int) -> dict:
         "horizon_h": manifest["horizon_h"],
         "cv_auprc_point_estimate": manifest["cv_auprc_point_estimate"],
         "reasons": reasons,
+        **scope_for_hour(hour),
     }

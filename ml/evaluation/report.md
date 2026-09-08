@@ -45,35 +45,28 @@
 Decision: **dropped**. A delta this far inside the bootstrap CI, winning barely more often than a coin flip, does not justify carrying a protected attribute into a clinical model. `gender` is excluded from the feature set (`engineer.feature_matrix_for_training(include_demographics=False)`, the default); age and first care unit are kept, being a validated severity covariate and clinical context respectively, not proxies.
 
 
-**Subgroup performance** at a single shared alert threshold (top decile of scores, p=0.066). One threshold applied to every subgroup on purpose: a model can be equally accurate overall and still distribute its errors unequally. Subgroups below 200 rows or 10 positives are marked underpowered and their metrics withheld rather than reported as numbers nobody should act on.
+**Subgroup performance** at a single shared alert threshold (top decile of scores, p=0.066). One threshold applied to every subgroup on purpose: a model can be equally accurate overall and still distribute its errors unequally. Subgroups whose 95% CI is wider than 0.40 have their point estimates **withheld**: an interval that wide is consistent with a useless model and an excellent one at once, so publishing the midpoint manufactures a finding the data cannot support. The bootstrap resamples patients, not rows -- rows from one patient are not independent, and a row-level bootstrap reports a CI far narrower than the data earns.
 
-| dimension   | subgroup                                         |   n_rows |   n_positives |   event_rate |   alert_rate |    auroc |    auprc | underpowered   |
-|:------------|:-------------------------------------------------|---------:|--------------:|-------------:|-------------:|---------:|---------:|:---------------|
-| age_band    | 50-64                                            |      952 |            37 |       0.0389 |       0.1628 |   0.8494 |   0.5070 | False          |
-| age_band    | 65-79                                            |      638 |            37 |       0.0580 |       0.0768 |   0.8411 |   0.5906 | False          |
-| age_band    | 80+                                              |      832 |            24 |       0.0288 |       0.0781 |   0.7133 |   0.1916 | False          |
-| age_band    | <50                                              |      557 |            22 |       0.0395 |       0.0521 |   0.8433 |   0.6256 | False          |
-| care_unit   | Cardiac Vascular Intensive Care Unit (CVICU)     |      305 |            23 |       0.0754 |       0.1180 |   0.9915 |   0.8874 | False          |
-| care_unit   | Coronary Care Unit (CCU)                         |      275 |            19 |       0.0691 |       0.1055 |   0.7481 |   0.4185 | False          |
-| care_unit   | Medical Intensive Care Unit (MICU)               |      571 |            24 |       0.0420 |       0.1086 |   0.6845 |   0.4803 | False          |
-| care_unit   | Medical/Surgical Intensive Care Unit (MICU/SICU) |      461 |            22 |       0.0477 |       0.0803 |   0.7987 |   0.3609 | False          |
-| care_unit   | Neuro Intermediate                               |       19 |             0 |       0.0000 |       0.0000 | nan      | nan      | True           |
-| care_unit   | Neuro Stepdown                                   |      169 |             0 |       0.0000 |       0.0118 | nan      | nan      | True           |
-| care_unit   | Neuro Surgical Intensive Care Unit (Neuro SICU)  |      121 |             3 |       0.0248 |       0.0248 | nan      | nan      | True           |
-| care_unit   | Surgical Intensive Care Unit (SICU)              |      605 |            12 |       0.0198 |       0.0959 |   0.9793 |   0.6597 | False          |
-| care_unit   | Trauma SICU (TSICU)                              |      453 |            17 |       0.0375 |       0.1567 |   0.4690 |   0.0656 | False          |
-| sex         | F                                                |     1960 |            32 |       0.0163 |       0.0658 |   0.8633 |   0.5008 | False          |
-| sex         | M                                                |     1019 |            88 |       0.0864 |       0.1658 |   0.8033 |   0.4931 | False          |
-
-
-**Subgroups of concern** -- adequately powered, but AUROC below 0.70. These are the audit's actual output: the headline AUROC is an average, and an average hides a subgroup the model cannot rank at all. An AUROC at or below 0.5 is worse than chance for that population, and a shared alert threshold applied to it is not merely uninformative but actively misleading.
-
-| dimension   | subgroup                           |   n_rows |   n_positives |   auroc |   auprc |
-|:------------|:-----------------------------------|---------:|--------------:|--------:|--------:|
-| care_unit   | Trauma SICU (TSICU)                |      453 |            17 |  0.4690 |  0.0656 |
-| care_unit   | Medical Intensive Care Unit (MICU) |      571 |            24 |  0.6845 |  0.4803 |
-
-Not fixed here, and not papered over: with 120 positives spread across nine care units, per-subgroup remediation would be fitting to noise. The honest statement is that this model should not be deployed to a subgroup it cannot rank, and that identifying which ones those are is what this audit is for.
+| dimension    | subgroup                                         |   n_rows |   n_positives |   event_rate |   alert_rate |    auroc |    auprc |   auroc_lo |   auroc_hi |   ci_width | uninformative   |
+|:-------------|:-------------------------------------------------|---------:|--------------:|-------------:|-------------:|---------:|---------:|-----------:|-----------:|-----------:|:----------------|
+| age_band     | 50-64                                            |      952 |            37 |       0.0389 |       0.1628 |   0.8494 |   0.5070 |     0.7161 |     0.9959 |     0.2798 | False           |
+| age_band     | 65-79                                            |      638 |            37 |       0.0580 |       0.0768 |   0.8411 |   0.5906 |     0.6698 |     0.9836 |     0.3138 | False           |
+| age_band     | 80+                                              |      832 |            24 |       0.0288 |       0.0781 | nan      | nan      |     0.5052 |     0.9870 |     0.4818 | True            |
+| age_band     | <50                                              |      557 |            22 |       0.0395 |       0.0521 |   0.8433 |   0.6256 |     0.6040 |     0.9997 |     0.3957 | False           |
+| care_unit    | Cardiac Vascular Intensive Care Unit (CVICU)     |      305 |            23 |       0.0754 |       0.1180 |   0.9915 |   0.8874 |     0.9706 |     1.0000 |     0.0294 | False           |
+| care_unit    | Coronary Care Unit (CCU)                         |      275 |            19 |       0.0691 |       0.1055 | nan      | nan      |     0.4829 |     0.9811 |     0.4982 | True            |
+| care_unit    | Medical Intensive Care Unit (MICU)               |      571 |            24 |       0.0420 |       0.1086 | nan      | nan      |     0.4913 |     0.9989 |     0.5076 | True            |
+| care_unit    | Medical/Surgical Intensive Care Unit (MICU/SICU) |      461 |            22 |       0.0477 |       0.0803 | nan      | nan      |     0.5785 |     0.9944 |     0.4159 | True            |
+| care_unit    | Neuro Intermediate                               |       19 |             0 |       0.0000 |       0.0000 | nan      | nan      |   nan      |   nan      |   nan      | True            |
+| care_unit    | Neuro Stepdown                                   |      169 |             0 |       0.0000 |       0.0118 | nan      | nan      |   nan      |   nan      |   nan      | True            |
+| care_unit    | Neuro Surgical Intensive Care Unit (Neuro SICU)  |      121 |             3 |       0.0248 |       0.0248 | nan      | nan      |   nan      |   nan      |   nan      | True            |
+| care_unit    | Surgical Intensive Care Unit (SICU)              |      605 |            12 |       0.0198 |       0.0959 |   0.9793 |   0.6597 |     0.9559 |     0.9997 |     0.0438 | False           |
+| care_unit    | Trauma SICU (TSICU)                              |      453 |            17 |       0.0375 |       0.1567 | nan      | nan      |     0.2024 |     0.9307 |     0.7283 | True            |
+| sex          | F                                                |     1960 |            32 |       0.0163 |       0.0658 |   0.8633 |   0.5008 |     0.6821 |     0.9939 |     0.3119 | False           |
+| sex          | M                                                |     1019 |            88 |       0.0864 |       0.1658 |   0.8033 |   0.4931 |     0.6897 |     0.9124 |     0.2227 | False           |
+| time_in_stay | hour 0-5                                         |      497 |            78 |       0.1569 |       0.3541 |   0.8991 |   0.7151 |     0.8140 |     0.9604 |     0.1464 | False           |
+| time_in_stay | hour 24+                                         |     1377 |            15 |       0.0109 |       0.0370 | nan      | nan      |     0.2952 |     0.7664 |     0.4712 | True            |
+| time_in_stay | hour 6-23                                        |     1105 |            27 |       0.0244 |       0.0643 |   0.6681 |   0.0737 |     0.5124 |     0.8775 |     0.3651 | False           |
 
 
 ## Verification (PROJECT_PLAN.md section 15)

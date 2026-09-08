@@ -26,9 +26,9 @@ def test_drop_demographics_removes_gender_but_keeps_clinical_context():
     assert "first_careunit" in out.columns
 
 
-def test_underpowered_subgroups_report_counts_but_withhold_metrics():
-    """A metric computed on four patients is worse than no metric: it invites exactly
-    the overinterpretation the audit exists to prevent."""
+def test_tiny_subgroups_report_counts_but_withhold_metrics():
+    """A metric computed on a handful of patients is worse than no metric: it invites
+    exactly the overinterpretation the audit exists to prevent."""
     n = 20
     y = np.zeros(n)
     y[0] = 1
@@ -36,10 +36,44 @@ def test_underpowered_subgroups_report_counts_but_withhold_metrics():
     sub = pd.DataFrame({"sex": ["F"] * n})
     table = fairness.subgroup_metrics(y, score, sub, alert_threshold=0.5)
     row = table.iloc[0]
-    assert row.underpowered
+    assert row.uninformative
     assert np.isnan(row.auroc) and np.isnan(row.auprc)
-    # Counts are still shown, so the suppression is visible rather than a silent gap.
+    # Counts stay visible, so the suppression is legible rather than a silent gap.
     assert row.n_rows == n and row.n_positives == 1
+
+
+def test_a_wide_confidence_interval_withholds_the_point_estimate(monkeypatch):
+    """The regression this module exists for.
+
+    Trauma SICU had 453 rows and 17 positives -- comfortably past any count-based gate
+    -- and a patient-grouped AUROC CI of 0.13-0.91. The count gate let it through and
+    it was written up as "worse than chance", a claim the data never supported. The
+    gate is now the interval width itself, so a subgroup is published only when its
+    estimate is precise enough to mean something.
+
+    The threshold is tightened here rather than trying to synthesise a specific
+    bootstrap width: what needs pinning is that width, not counts, decides.
+    """
+    rng = np.random.default_rng(0)
+    n, n_patients = 400, 20
+    groups = np.repeat(np.arange(n_patients), n // n_patients)
+    y = np.zeros(n)
+    y[rng.choice(n, 30, replace=False)] = 1
+    score = rng.random(n)
+    sub = pd.DataFrame({"care_unit": ["TSICU"] * n})
+
+    wide_open = fairness.subgroup_metrics(y, score, sub, 0.5, groups=groups).iloc[0]
+    assert not wide_open.uninformative and not np.isnan(wide_open.auroc)
+
+    # Same data, same counts -- only the precision demanded changes.
+    monkeypatch.setattr(fairness, "MAX_INFORMATIVE_CI_WIDTH", wide_open.ci_width / 2)
+    gated = fairness.subgroup_metrics(y, score, sub, 0.5, groups=groups).iloc[0]
+    assert gated.n_rows >= fairness.MIN_SUBGROUP_ROWS
+    assert gated.n_positives >= fairness.MIN_SUBGROUP_POSITIVES
+    assert gated.uninformative, "counts passed, so only the CI width can have gated it"
+    assert np.isnan(gated.auroc) and np.isnan(gated.auprc)
+    # The interval itself stays visible -- suppression must be legible, not silent.
+    assert not np.isnan(gated.auroc_lo) and not np.isnan(gated.auroc_hi)
 
 
 def test_alert_rate_uses_one_shared_threshold_across_subgroups():
@@ -64,17 +98,32 @@ def test_ablation_requires_a_clear_majority_not_a_coin_flip():
     assert convincing.demographics_earn_their_place
 
 
-def test_subgroups_of_concern_surfaces_below_chance_ranking_only_when_powered():
+def test_subgroups_of_concern_tests_the_ci_upper_bound_not_the_point_estimate():
+    """A low point estimate with a high upper bound means "not measured", not "bad".
+    Only a subgroup whose whole plausible range is poor belongs on the concern list.
+    """
     table = pd.DataFrame(
         {
-            "dimension": ["care_unit", "care_unit", "care_unit"],
-            "subgroup": ["TSICU", "CVICU", "tiny"],
-            "n_rows": [453, 305, 19],
-            "n_positives": [17, 23, 0],
-            "auroc": [0.469, 0.99, np.nan],
-            "auprc": [0.066, 0.89, np.nan],
-            "underpowered": [False, False, True],
+            "dimension": ["care_unit"] * 3,
+            "subgroup": ["wide_ci", "confidently_poor", "good"],
+            "n_rows": [453, 600, 305],
+            "n_positives": [17, 40, 23],
+            "auroc": [0.469, 0.55, 0.99],
+            "auroc_lo": [0.13, 0.45, 0.97],
+            "auroc_hi": [0.91, 0.64, 1.00],
+            "ci_width": [0.78, 0.19, 0.03],
+            "uninformative": [True, False, False],
         }
     )
     concerns = fairness.subgroups_of_concern(table)
-    assert list(concerns.subgroup) == ["TSICU"]
+    # wide_ci is excluded twice over: uninformative, and its upper bound is 0.91.
+    assert list(concerns.subgroup) == ["confidently_poor"]
+
+
+def test_time_band_is_a_subgroup_dimension_when_hours_are_supplied():
+    """Time since admission is the adequately-powered audit axis, so it has to be
+    available to the audit at all."""
+    x = pd.DataFrame({"gender": ["M", "F", "M"], "admission_age": [70, 60, 50]})
+    out = fairness.subgroup_frame(x, hours=np.array([0, 10, 30]))
+    assert list(out["time_in_stay"]) == ["hour 0-5", "hour 6-23", "hour 24+"]
+    assert "time_in_stay" not in fairness.subgroup_frame(x).columns

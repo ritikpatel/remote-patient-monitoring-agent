@@ -104,7 +104,7 @@ docker compose -f infra/compose/docker-compose.yml up -d <services you need>
 # see infra/compose/README.md — an 8GB machine can't run everything at once
 
 # 5. Everything
-pytest -q   # 317 passed, 6 skipped (skips self-detect missing optional infra)
+pytest -q   # 312 passed, 14 skipped without infra; 324 passed, 2 skipped with it up
 ```
 
 ## What's real vs. what's honestly scoped

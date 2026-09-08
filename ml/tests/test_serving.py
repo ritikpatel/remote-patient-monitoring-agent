@@ -126,3 +126,21 @@ def test_score_one_against_the_real_promoted_model() -> None:
     result = serving.score_one(conn, stay_id, hour)
     assert 0.0 <= result["probability"] <= 1.0
     assert len(result["reasons"]) > 0
+
+
+def test_ml_predictions_declare_their_measured_validated_scope():
+    """The actionable output of the subgroup audit. Held-out AUPRC falls from 0.715 in
+    the first 6 ICU hours to 0.074 after, and 57% of training positives are in the
+    first two hours -- so a consumer reading only the headline number over-trusts a
+    late-stay score badly. The payload now says so instead of leaving it to be assumed.
+    """
+    from ml.models import serving
+
+    early = serving.scope_for_hour(0)
+    late = serving.scope_for_hour(50)
+    assert early["in_validated_scope"] is True
+    assert late["in_validated_scope"] is False
+    assert "validated scope" in late["scope_note"]
+    # The note must point somewhere useful, not merely warn.
+    assert "/score/" in late["scope_note"]
+    assert serving.scope_for_hour(serving.VALIDATED_SCOPE_MAX_HOUR)["in_validated_scope"] is False

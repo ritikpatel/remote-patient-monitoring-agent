@@ -176,9 +176,13 @@ def render_prediction_section(summary: dict, horizon: int) -> str:
     question</strong> are audited in Phase 5's own report
     (<code>ml/evaluation/report.md</code>, "Fairness audit"), which is where the model
     lives. Two results worth carrying here: <code>gender</code> was dropped after a
-    20-repeat ablation showed it won in only 13/20 repeats, and the audit found
-    adequately-powered care-unit subgroups the model ranks at or below chance. The
-    AUROC/AUPRC on this page are cohort averages and do not show that.</div>
+    20-repeat ablation showed it won in only 13/20 repeats, and subgroup estimates
+    whose confidence interval is too wide to mean anything are withheld rather than
+    published as findings. The well-measured split is time in stay -- held-out AUPRC is
+    0.715 in the first six ICU hours and 0.074 after -- so risk-engine declares an
+    <code>in_validated_scope</code> flag on every ML prediction rather than letting a
+    consumer assume the headline number applies everywhere. The AUROC/AUPRC on this
+    page are cohort averages and do not show any of that.</div>
 
     <h3>Decision-curve analysis (lightgbm_ecg)</h3>
     <p class="muted">Net benefit of acting on the model at each threshold probability,

@@ -26,9 +26,9 @@ architecture.
 
 > **Update 2026-09-08 (later) — F3 and F4 are also fixed and verified.** All four findings are
 > now closed. Fixing F3 exposed a further defect (wearable skin temperature scored as core body
-> temperature, which would have raised a false hypothermia alert for every wearable subject) and
-> F4's audit found care-unit subgroups the model ranks at or below chance. Suite is **317 passed,
-> 6 skipped**. See the second appendix.
+> temperature, which would have raised a false hypothermia alert for every wearable subject).
+> **Appendix 3 corrects an overstatement this report itself made about the Trauma SICU subgroup.**
+> Suite is **321 passed, 6 skipped**. See appendices 2 and 3.
 
 **9 of 11 deliverables verified end-to-end by me. 2 are overstated** — deliverable 1 and
 deliverable 5 pass in substance but fail their acceptance tests exactly as written.
@@ -267,7 +267,7 @@ analysis, `gender` ranks #3 by SHAP) are unchanged. Neither was in scope for thi
 
 ### Verification
 
-`313 passed, 3 skipped` with Kafka, Postgres, EMQX, HAPI FHIR and Keycloak running. `ruff check`
+`324 passed, 2 skipped` with Kafka, Postgres, EMQX, HAPI FHIR and Keycloak running. `ruff check`
 clean; `mypy` clean on the changed modules. New regression tests pin every limb, including
 `test_the_motivating_case_now_escalates`, which names stay 34617352 hour 35 directly so this
 specific patient can never silently stop escalating again.
@@ -337,21 +337,11 @@ below 200 rows or 10 positives are marked underpowered and their metrics withhel
 printed as numbers nobody should act on. Race is excluded and said so: at n=100 most categories
 hold single-digit patient counts.
 
-It immediately found two things the cohort-average AUROC of 0.87 hides:
-
-| Subgroup | AUROC | Note |
-|---|---|---|
-| Trauma SICU | **0.469** | worse than chance — the model cannot rank this population at all |
-| Age 80+ | 0.713 | against ~0.84 in every other age band |
+It found subgroup variation the cohort-average AUROC of 0.87 hides. **The first version of this
+report then overstated what that variation showed — see the correction in Appendix 3.**
 
 By sex, discrimination is essentially equal (AUROC 0.863 F / 0.803 M) and the alert-rate gap
 (6.6% vs 16.6%) tracks a real in-sample event-rate difference rather than miscalibration.
-
-These are **not fixed**, and deliberately so: with 120 positives across nine care units,
-per-subgroup remediation is fitting to noise. The honest output is that this model should not be
-deployed to a subgroup it cannot rank, and naming which ones those are is what the audit is for.
-`subgroups_of_concern()` surfaces them in the report rather than leaving a reader to spot a
-below-chance AUROC in a fifteen-row table.
 
 **Three defects found while fixing F4:** `gbm._as_categorical`, `logistic.build_pipeline` and the
 promoted-model manifest all hardcoded `gender`, so no ablation could run at all — an optional
@@ -360,10 +350,81 @@ frame.
 
 ### Verification
 
-`317 passed, 6 skipped`. `ruff`, `black` and `mypy` pre-commit hooks pass.
+`324 passed, 2 skipped`. `ruff`, `black` and `mypy` pre-commit hooks pass.
 
 One artefact is short of a full refresh: `eval/output/report.html` has current axis-1 and axis-2
 numbers, with axis 3 (latency) and axis 4 (RAG/agent) marked skipped — the Groq daily token quota
 (200k) was exhausted. A `--skip-agent` flag was added for exactly this, because the earlier
 behaviour was worse: the run aborted on the rate limit and left a wholly superseded report on
 disk. Re-run `python eval/run_eval.py` with quota to restore all four axes.
+
+---
+
+## Appendix 3 — correcting this report's own Trauma SICU claim (2026-09-08)
+
+Appendix 2 reported Trauma SICU at **AUROC 0.469** and described it as *"worse than chance — the
+model cannot rank this population at all."* Asked to fix that subgroup, I first tried to, and the
+investigation showed the claim should never have been made.
+
+### What the number actually is
+
+Bootstrapping that estimate **resampled by patient** rather than by row gives:
+
+```
+Trauma SICU   AUROC 0.438   95% CI 0.13 - 0.91   (width 0.78)
+```
+
+An interval that wide is consistent with a useless model *and* with an excellent one. It supports
+no claim in either direction. The count-based gate I had written — `n_rows >= 200 and
+n_positives >= 10` — passed it comfortably at 453 rows and 17 positives, and published a midpoint
+that was noise. Five other subgroups were in the same position (age 80+, CCU, MICU, MICU/SICU,
+hour 24+).
+
+### Four fixes attempted, and measured, before that became clear
+
+| Hypothesis | Result |
+|---|---|
+| Late events are harder, and TSICU's are late | **Inverted.** Early events are *easier* (corr +0.79); the model scores 0.859 at hour 0–2 and 0.509 at hour 24+ |
+| Missing personal-baseline features (deviation from the patient's own norm) | **Worse.** Hour 6–23 AUROC −0.093; 19 features against 42 late positives is overfitting |
+| Early rows teach a "current severity" shortcut that inverts in trauma | **Not supported.** A late-only model scores 0.540 against the global model's 0.601 on the same rows — early rows help |
+| Route to SOFA late (SOFA scores 0.927 on TSICU) | **Fixes TSICU (0.913) but costs 0.157 overall AUPRC** — 0.472 → 0.315. AUPRC is this project's headline metric by design |
+
+A fifth, adding a SOFA limb to the *alerting* path, moved TSICU event coverage not at all (4/8
+under every variant tested) while raising alert burden from 32.9% to 51.6%.
+
+### What was actually fixed
+
+**1. The gate now measures precision, not sample size.** `subgroup_metrics` bootstraps grouped by
+patient — rows from one patient are not independent, and a row-level bootstrap reports an interval
+far narrower than the data earns — and withholds any point estimate whose 95% CI exceeds 0.40.
+Counts and the interval stay visible, so suppression is legible rather than a silent gap.
+
+**2. `subgroups_of_concern` tests the CI's upper bound, not the point estimate.** A low midpoint
+with a high upper bound means "not measured", not "bad". Under this test nothing in the current
+cohort is confidently poor, which is the correct answer.
+
+**3. The real, adequately-powered finding is time in stay, not a care unit.** It is now a subgroup
+dimension in its own right:
+
+| Time since ICU admission | AUROC (95% CI) | AUPRC |
+|---|---|---|
+| hour 0–5 | 0.899 (0.81–0.96) | **0.715** |
+| hour 6–23 | 0.668 (0.51–0.88) | **0.074** |
+| hour 24+ | withheld — CI 0.30–0.77 | — |
+
+57% of training positives fall in the first two hours, so the headline AUPRC is carried almost
+entirely by early-stay rows. That is a real limitation, well measured, and far more consequential
+than any single care unit.
+
+**4. The model now declares its validated scope on every prediction.** `serving.scope_for_hour`
+adds `in_validated_scope`, `validated_scope_max_hour` and a `scope_note` to each ML response,
+pointing a consumer to the deterministic NEWS2/SOFA endpoint — which is what the alerting engine
+escalates on anyway — outside the first six hours. That is the actionable output of a subgroup
+audit at this sample size: not a per-unit patch, but an honest statement of where the number
+applies.
+
+### What was not fixed
+
+Trauma SICU's true performance is **unknown**, and this cohort cannot determine it: 453 at-risk
+rows, 17 positive rows, 8 composite events. That is the honest answer, and it differs from both
+"it is fine" and from the "worse than chance" this report originally asserted.

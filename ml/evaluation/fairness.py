@@ -18,10 +18,32 @@ this module answers it two ways:
    positive rate and alert rate. A model can be equally accurate overall and still
    distribute its errors unequally, which is what fairness auditing is actually for.
 
-Subgroups here are sex, age band and first ICU care unit. Race is deliberately NOT
-included: MIMIC-IV records it, but at n=100 most categories hold single-digit patient
-counts, and a subgroup metric computed on four patients invites exactly the
-overinterpretation this module exists to prevent. Stated rather than silently omitted.
+Subgroups here are sex, age band, first ICU care unit, and **time since ICU admission**.
+Race is deliberately NOT included: MIMIC-IV records it, but at n=100 most categories
+hold single-digit patient counts, and a subgroup metric computed on four patients
+invites exactly the overinterpretation this module exists to prevent. Stated rather
+than silently omitted.
+
+Why suppression is by confidence-interval width, not by row and positive counts
+-------------------------------------------------------------------------------
+The first version of this module gated on ``n_rows >= 200 and n_positives >= 10``, and
+that gate was not strict enough to do its job. Trauma SICU passed it -- 453 rows, 17
+positives -- and reported AUROC 0.469, which the review then wrote up as "worse than
+chance: the model cannot rank this population at all."
+
+Bootstrapping that estimate, grouped by patient, gives a 95% CI of **0.13-0.91**. An
+interval that wide is consistent with a model that is useless *and* with one that is
+excellent; it supports no claim in either direction. The count-based gate let a number
+through that looked like a finding and was actually noise, which is the precise failure
+this module exists to prevent -- so the gate now measures the thing that matters
+directly. A subgroup is reported when its CI is narrow enough to mean something, and
+``subgroups_of_concern`` flags a subgroup only when the CI's *upper* bound is poor,
+i.e. when the data can actually support "this is bad" rather than "this is unmeasured".
+
+By that standard the well-measured subgroups here are CVICU (0.99, CI width 0.03) and
+SICU (0.98, width 0.05), and the real, adequately-powered finding is not a care unit at
+all -- it is time since admission (see ``TIME_BANDS``), where the early and late
+intervals do not overlap.
 """
 
 from __future__ import annotations
@@ -34,9 +56,17 @@ import pandas as pd
 from ml.evaluation import metrics
 
 DEMOGRAPHIC_COLUMNS = ("gender",)
-MIN_SUBGROUP_ROWS = 200
-MIN_SUBGROUP_POSITIVES = 10
+# Floors, not the real gate: below these a bootstrap is not worth running at all.
+MIN_SUBGROUP_ROWS = 100
+MIN_SUBGROUP_POSITIVES = 5
+# The real gate. A 95% CI wider than this cannot distinguish a useless model from a
+# good one, so the point estimate is withheld rather than published as a finding.
+MAX_INFORMATIVE_CI_WIDTH = 0.40
+N_BOOTSTRAP = 600
 AGE_BANDS = [(0, 50, "<50"), (50, 65, "50-64"), (65, 80, "65-79"), (80, 200, "80+")]
+# Time since ICU admission. The adequately-powered axis: the model is trained mostly on
+# early rows (57% of positives fall in the first two hours) and degrades after them.
+TIME_BANDS = [(0, 6, "hour 0-5"), (6, 24, "hour 6-23"), (24, 10**6, "hour 24+")]
 
 
 @dataclass(frozen=True)
@@ -63,7 +93,14 @@ def age_band(age: float) -> str:
     return "unknown"
 
 
-def subgroup_frame(x: pd.DataFrame) -> pd.DataFrame:
+def time_band(hour: float) -> str:
+    for lo, hi, label in TIME_BANDS:
+        if lo <= hour < hi:
+            return label
+    return "unknown"
+
+
+def subgroup_frame(x: pd.DataFrame, hours: np.ndarray | None = None) -> pd.DataFrame:
     """The subgroup labels for each scored row, derived from features already present
     in X so no extra warehouse round trip is needed."""
     out = pd.DataFrame(index=x.index)
@@ -73,6 +110,8 @@ def subgroup_frame(x: pd.DataFrame) -> pd.DataFrame:
         out["age_band"] = x["admission_age"].astype(float).map(age_band)
     if "first_careunit" in x:
         out["care_unit"] = x["first_careunit"].astype(str)
+    if hours is not None:
+        out["time_in_stay"] = pd.Series(np.asarray(hours), index=x.index).map(time_band)
     return out
 
 
@@ -81,13 +120,19 @@ def subgroup_metrics(
     y_score: np.ndarray,
     subgroups: pd.DataFrame,
     alert_threshold: float,
+    groups: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """Per-subgroup AUROC, AUPRC, event rate and alert rate.
+    """Per-subgroup AUROC/AUPRC with bootstrap CIs, event rate and alert rate.
 
     ``alert_threshold`` is applied identically to every subgroup -- the point of the
     alert-rate column is to show how one shared threshold lands on different
     populations, which is where a model that is "equally accurate" can still be
     unequally useful.
+
+    ``groups`` (patient ids) makes the bootstrap resample *patients*, not rows. Rows
+    from one patient are not independent, and a row-level bootstrap would report a
+    CI far narrower than the data supports -- which is how an uninformative number
+    gets mistaken for a finding.
     """
     rows = []
     ok = ~np.isnan(y_true) & ~np.isnan(y_score)
@@ -97,7 +142,17 @@ def subgroup_metrics(
             mask = ok & (values == level)
             n = int(mask.sum())
             n_pos = int(y_true[mask].sum())
-            suppressed = n < MIN_SUBGROUP_ROWS or n_pos < MIN_SUBGROUP_POSITIVES
+            too_small = n < MIN_SUBGROUP_ROWS or n_pos < MIN_SUBGROUP_POSITIVES
+            auroc = auprc = lo = hi = width = np.nan
+            if not too_small:
+                g = groups[mask] if groups is not None else np.arange(n)
+                r = metrics.bootstrap_ci_grouped(
+                    y_true[mask], y_score[mask], g, metrics._safe_auroc, n_boot=N_BOOTSTRAP
+                )
+                lo, hi, width = r.lo, r.hi, r.hi - r.lo
+                if width <= MAX_INFORMATIVE_CI_WIDTH:
+                    auroc = r.point
+                    auprc = metrics._safe_auprc(y_true[mask], y_score[mask])
             rows.append(
                 {
                     "dimension": dimension,
@@ -108,15 +163,13 @@ def subgroup_metrics(
                     "alert_rate": (
                         round(float((y_score[mask] >= alert_threshold).mean()), 4) if n else np.nan
                     ),
-                    # Too small to interpret is reported as NaN with the counts left
-                    # visible, rather than as a number nobody should act on.
-                    "auroc": (
-                        np.nan if suppressed else metrics._safe_auroc(y_true[mask], y_score[mask])
-                    ),
-                    "auprc": (
-                        np.nan if suppressed else metrics._safe_auprc(y_true[mask], y_score[mask])
-                    ),
-                    "underpowered": suppressed,
+                    # Withheld unless the interval is narrow enough to mean something.
+                    "auroc": auroc,
+                    "auprc": auprc,
+                    "auroc_lo": lo,
+                    "auroc_hi": hi,
+                    "ci_width": width,
+                    "uninformative": bool(too_small or not (width <= MAX_INFORMATIVE_CI_WIDTH)),
                 }
             )
     return pd.DataFrame(rows).sort_values(["dimension", "subgroup"]).reset_index(drop=True)
@@ -126,14 +179,15 @@ CONCERN_AUROC = 0.70
 
 
 def subgroups_of_concern(table: pd.DataFrame, threshold: float = CONCERN_AUROC) -> pd.DataFrame:
-    """Adequately-powered subgroups where the model discriminates poorly.
+    """Subgroups the data can actually show are poor.
 
-    A fairness table nobody reads is not an audit. This surfaces the rows that
-    actually matter so the report can name them, rather than leaving a reader to spot
-    an AUROC below chance in a fifteen-row table.
+    The test is on the CI's **upper** bound, not the point estimate. A point estimate
+    below threshold with an upper bound above it means "not measured", not "bad" --
+    Trauma SICU scored 0.469 with an upper bound of 0.91, and reporting that as a
+    concern is what produced a finding the data never supported.
     """
-    ok = table[~table.underpowered].copy()
-    return ok[ok.auroc < threshold].sort_values("auroc").reset_index(drop=True)
+    ok = table[~table.uninformative].copy()
+    return ok[ok.auroc_hi < threshold].sort_values("auroc").reset_index(drop=True)
 
 
 def drop_demographics(x: pd.DataFrame) -> pd.DataFrame:
