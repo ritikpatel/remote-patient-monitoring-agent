@@ -14,6 +14,50 @@ python warehouse/news2.py           # capstone.news2         (ward-standard + IC
 
 Each script is idempotent — re-running it drops and rebuilds only its own tables.
 
+## Building from the full MIMIC-IV release
+
+The same four scripts build a full release. What changes is scale: full
+MIMIC-IV's `chartevents` is ~432M rows against the demo's 668,862, and a
+whole-release warehouse is a tens-of-gigabytes commitment.
+
+```bash
+python warehouse/fetch_mimic4.py                      # check the landing zone + disk
+python warehouse/build_duckdb.py \
+    --data-dir data/raw/mimic-iv-3.1 \
+    --db warehouse/mimic4_full.db \
+    --cohort-subjects 5000 --force                    # seeded sample of 5,000 ICU patients
+python warehouse/run_concepts.py  --db warehouse/mimic4_full.db
+python warehouse/hourly_grid.py   --db warehouse/mimic4_full.db
+python warehouse/news2.py         --db warehouse/mimic4_full.db
+```
+
+**Getting the data is your step, not this repo's.** MIMIC-IV is credentialed
+access — a PhysioNet account, CITI training, a signed DUA. `fetch_mimic4.py`
+downloads nothing and never touches a credential; it checks whether the
+directory is complete, checks whether this machine has the disk, and prints the
+`wget` command for you to run (with an interactive password prompt).
+
+**`--cohort-subjects N` samples patients, not stays**, and that distinction is
+load-bearing rather than stylistic. Dropping one of a patient's ICU stays would
+move a death onto a stay that ended in a live transfer (labels are attributed to
+`max(icustay_seq)` per admission), delete readmission events outright (they are
+defined on *consecutive pairs* of stays), and split one patient across CV folds.
+Sampling subjects keeps each patient's complete hospital history. The sample is
+uniform and leaves prevalence alone — case-control sampling would wreck the
+calibration that alert thresholds are set from. See `mimic_source.py`.
+
+**How large a cohort?** Not a guess — [`ml/evaluation/reliability_report.md`](../ml/evaluation/reliability_report.md)
+measures the learning curve and extrapolates it. Its answer at the time of
+writing: a 0.10-wide AUPRC confidence interval needs on the order of 860
+positive subjects against the demo's 49, which is a **4,000–5,000 patient
+cohort** at a plausible event rate.
+
+Validation adapts to what was built. An unfiltered demo build is checked against
+`validate_demo.sql`'s exact published row counts, as before. Anything else has
+no published counts to check, so it gets structural checks instead —
+referential integrity across `patients`/`admissions`/`icustays`/`chartevents`,
+and containment of every loaded row within the cohort.
+
 ## Schemas
 
 | Schema | Contents | Source |
@@ -31,7 +75,29 @@ Each script is idempotent — re-running it drops and rebuilds only its own tabl
   100-patient / 140-stay demo. `sofa` covers all 140 stays.
 - `capstone.hourly_grid`: 12,004 patient-hours across 140 stays, reproducing
   `notebooks/01_capstone_eda.ipynb` section 5 exactly, extended with `<col>_was_imputed` and
-  `<col>_hours_since_last_obs` per core vital (R2).
+  `<col>_hours_since_last_obs` per core vital (R2). The pivot now runs **in DuckDB** rather than
+  pulling every charted value into a pandas `pivot_table` — the old shape was one intermediate row
+  per charted value, which does not survive a cohort larger than the demo.
+  `tests/test_hourly_grid.py` asserts the port against a literal re-implementation of the pandas
+  algorithm and finds them identical on all 37 columns, at float32 tolerance: `chartevents.valuenum`
+  is declared `FLOAT`, so pandas averaged in single precision while DuckDB's `AVG` accumulates in
+  double. The SQL result is the more precise of the two.
+
+## What is verified, and what is not
+
+The cohort path is exercised for real, not by inspection: `tests/test_mimic_source.py` builds a
+40-of-100-subject cohort from the actual demo dataset and asserts cohort containment, that reference
+tables load whole, that every stay of a sampled subject survives, and that declared column types
+land correctly.
+
+**It has never been run against a real full MIMIC-IV release, because that data is not on this
+machine.** Two things are therefore structurally complete but unproven: the vendored `create.sql`
+(from a 2026-09-01 `mimic-code` commit) is assumed to match the release you download, and the
+wall-clock cost of a multi-hundred-million-row load is unmeasured. The load is written to survive
+schema drift — columns are matched by name, extras are read but not inserted, absent ones land as
+NULL, and every type comes from the declared schema rather than DuckDB's sniffer — but "written to
+survive it" is not "observed surviving it". The first real full-release build should be treated as
+the test it is.
 - `capstone.news2`: NEWS2 computed per patient-hour, reproducing section 7 exactly (component
   distribution, 128/140 stays reaching ward "medium", 105/140 reaching ward "high" — see
   `news2_report.md` for why these differ from the *prose* figures in PROJECT_PLAN.md's E4, and for

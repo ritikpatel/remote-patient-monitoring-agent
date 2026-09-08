@@ -50,6 +50,21 @@ MUST_WORK = {
 }
 
 
+def status_path_for(db: Path) -> Path:
+    """Where this build's status report goes.
+
+    Derived from the database rather than fixed, because more than one warehouse
+    can now exist (``build_duckdb.py --cohort-subjects`` builds alongside the
+    demo). A hardcoded path meant running concepts against a cohort database
+    silently overwrote the committed demo report with a different cohort's
+    numbers -- observed, not hypothesised. The default database keeps the
+    historical filename so nothing already referencing it breaks.
+    """
+    if db.resolve() == DEFAULT_DB_PATH.resolve():
+        return STATUS_FILE
+    return STATUS_FILE.with_name(f"concept_status_{db.stem}.md")
+
+
 def build_order() -> list[str]:
     """Extract the .read sequence from duckdb.sql, e.g. 'demographics/icustay_times.sql'."""
     text = ORDER_FILE.read_text()
@@ -80,15 +95,36 @@ def run_one(conn: duckdb.DuckDBPyConnection, rel_path: str) -> dict:
     return result
 
 
-def write_status(results: list[dict]) -> None:
+def describe_cohort(conn: duckdb.DuckDBPyConnection) -> str:
+    """What the concepts were actually built against.
+
+    Read from the warehouse rather than hardcoded: with
+    ``build_duckdb.py --cohort-subjects`` this file can now describe a sample of
+    any size, and a status report that always claims "100 patients" would be
+    wrong for every build except one.
+    """
+    try:
+        row = conn.execute(
+            "select count(*), count(distinct subject_id) from mimiciv_icu.icustays"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 -- status text must never break the build
+        return "an unidentified MIMIC-IV warehouse"
+    if row is None:
+        return "an unidentified MIMIC-IV warehouse"
+    stays, subjects = int(row[0]), int(row[1])
+    demo = " (the MIMIC-IV Clinical Database Demo)" if subjects == 100 and stays == 140 else ""
+    return f"a MIMIC-IV warehouse of {subjects:,} patients / {stays:,} ICU stays{demo}"
+
+
+def write_status(results: list[dict], cohort: str, status_file: Path) -> None:
     ok = [r for r in results if r["status"] == "ok"]
     failed = [r for r in results if r["status"] == "failed"]
 
     lines = [
         "# Concept build status",
         "",
-        f"{len(ok)}/{len(results)} concepts built successfully ({len(failed)} failed) on the "
-        "MIMIC-IV Clinical Database Demo (100 patients, 140 ICU stays).",
+        f"{len(ok)}/{len(results)} concepts built successfully ({len(failed)} failed) on "
+        f"{cohort}.",
         "",
         "| Phase | Concept | Status | Rows | Note |",
         "|---|---|---|---|---|",
@@ -120,8 +156,8 @@ def write_status(results: list[dict]) -> None:
             lines.append(r["error"])
             lines.append("```")
 
-    STATUS_FILE.write_text("\n".join(lines) + "\n")
-    rel = STATUS_FILE.relative_to(REPO_ROOT)
+    status_file.write_text("\n".join(lines) + "\n")
+    rel = status_file.relative_to(REPO_ROOT)
     print(f"\n{len(ok)}/{len(results)} concepts ok. Status written to {rel}")
     if missing_must_work:
         print(f"WARNING: must-work concepts not ok: {', '.join(missing_must_work)}")
@@ -137,6 +173,8 @@ def main() -> int:
 
     conn = duckdb.connect(str(args.db))
     conn.execute("CREATE SCHEMA IF NOT EXISTS mimiciv_derived")
+    cohort = describe_cohort(conn)
+    print(f"Building against {cohort}")
 
     results = []
     t0 = time.time()
@@ -148,7 +186,7 @@ def main() -> int:
         results.append(r)
     conn.close()
 
-    write_status(results)
+    write_status(results, cohort, status_path_for(args.db))
     n_failed = sum(1 for r in results if r["status"] == "failed")
     print(f"Done in {time.time() - t0:.1f}s. {n_failed} of {len(results)} concepts failed.")
     return 0  # partial failure is expected and reported, not a build error

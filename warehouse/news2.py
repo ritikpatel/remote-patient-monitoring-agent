@@ -77,6 +77,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "warehouse" / "mimic4_demo.db"
 REPORT_FILE = REPO_ROOT / "warehouse" / "news2_report.md"
 
+
+def report_path_for(db: Path) -> Path:
+    """Where this warehouse's NEWS2 report goes.
+
+    Derived from the database for the same reason as
+    ``run_concepts.status_path_for`` and ``hourly_grid.parquet_path_for``: with
+    ``build_duckdb.py --cohort-subjects`` there can be several warehouses, and a
+    fixed path means the last build silently overwrites the committed demo
+    report with another cohort's numbers.
+    """
+    if db.resolve() == DEFAULT_DB_PATH.resolve():
+        return REPORT_FILE
+    return REPORT_FILE.with_name(f"news2_report_{db.stem}.md")
+
+
 # EDA section 7 regression targets, read off the executed figure
 # (eda_figures/08_news2.png, right panel) rather than PROJECT_PLAN.md's E4 prose
 # ("110/140 reach >=5; 68 reach >=7"): the executed notebook is the ground truth
@@ -512,9 +527,10 @@ escalating on it fires on 71.5% of the cohort. A GCS *drop* off sedation is spec
 enough to cost roughly one extra percentage point of alert burden. See the module
 docstring for the measurement of every variant against the 78 composite events.
 """
-    REPORT_FILE.write_text(report)
+    report_file = report_path_for(args.db)
+    report_file.write_text(report)
     print(f"\nWrote capstone.news2 ({len(grid):,} rows) to {args.db}")
-    print(f"Wrote {REPORT_FILE.relative_to(REPO_ROOT)}")
+    print(f"Wrote {report_file.relative_to(REPO_ROOT)}")
     return 0
 
 
