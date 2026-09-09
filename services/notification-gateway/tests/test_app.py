@@ -75,6 +75,86 @@ def test_notify_overnight_low_severity_still_pushes():
     assert resp.json()["pushed"] is True
 
 
+def test_notify_attempts_email_only_for_high_severity(monkeypatch):
+    """Email and SMS share the same trigger: 'high' attempts both (dry-run by
+    default), anything else attempts neither -- distinct from
+    route_notification()'s dashboard/push routing, which medium already
+    reaches."""
+    monkeypatch.delenv("EMAIL_MODE", raising=False)
+    resp = client.post(
+        "/notify",
+        json={
+            "patient_ref": "ICUStay/1",
+            "severity": "medium",
+            "message": "NEWS2=6",
+            "timestamp": "2110-01-01T12:00:00",
+        },
+    )
+    assert resp.json()["email"] is None
+
+
+def test_notify_email_is_dry_run_by_default_for_a_high_severity_alert(monkeypatch):
+    monkeypatch.delenv("EMAIL_MODE", raising=False)
+    monkeypatch.setenv("CLINICIAN_EMAIL", "clinician@example.com")
+    resp = client.post(
+        "/notify",
+        json={
+            "patient_ref": "ICUStay/1",
+            "severity": "high",
+            "message": "NEWS2=9: single red parameter",
+            "timestamp": "2110-01-01T12:00:00",
+        },
+    )
+    body = resp.json()
+    assert body["email"]["mode"] == "dry_run"
+    assert body["email"]["sent"] is False
+    assert "SYNTHETIC DRILL" in body["email"]["subject"]
+    assert "ICUStay/1" in body["email"]["body"]
+
+
+def test_notify_sends_a_real_email_when_live_and_configured(monkeypatch):
+    """Exercises the real message-building path via a fake SMTP transport --
+    reached by the same route a real EscalationLoop-raised alert takes."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from services.common import email as email_module
+
+    captured = {}
+
+    def fake_transport(host, port, username, password, msg):
+        captured["host"] = host
+        captured["to"] = msg["To"]
+
+    monkeypatch.setenv("EMAIL_MODE", "live")
+    monkeypatch.setenv("CLINICIAN_EMAIL", "clinician@example.com")
+    monkeypatch.setenv("SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("SMTP_USERNAME", "bot@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "app-password")
+    monkeypatch.setenv("SMTP_FROM_ADDRESS", "bot@example.com")
+
+    real_send = email_module.send
+    monkeypatch.setattr(
+        email_module, "send", lambda content, **kw: real_send(content, transport=fake_transport)
+    )
+    # Same reason as the SMS test below: notification-gateway's app.py imported
+    # `email` by reference (`from services.common import email, sms`), so
+    # patching the module's own `send` name is what both share.
+
+    resp = client.post(
+        "/notify",
+        json={
+            "patient_ref": "ICUStay/1",
+            "severity": "high",
+            "message": "NEWS2=9",
+            "timestamp": "2110-01-01T12:00:00",
+        },
+    )
+    body = resp.json()
+    assert body["email"]["sent"] is True
+    assert captured["host"] == "smtp.gmail.com"
+    assert captured["to"] == "clinician@example.com"
+
+
 def test_notify_attempts_sms_only_for_high_severity(monkeypatch):
     """The new channel this project's own SMS sender added: 'high' triggers an
     attempt (dry-run by default), anything else does not attempt at all --

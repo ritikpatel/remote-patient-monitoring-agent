@@ -168,9 +168,17 @@ services:
     environment:
       PUBLISHER_BACKEND: kafka
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # Starts mqtt_subscriber.py's background loop -- MQTT_HOST present is the
+      # only thing that turns it on (see app.py's _build_mqtt_subscriber). Port
+      # 1883 matches emqx's plain-MQTT listener above; there is no TLS cert
+      # material in this compose file, so this is the same unauthenticated-
+      # broker stance the rest of local dev takes (DEFAULT_API_KEY's docstring).
+      MQTT_HOST: emqx
+      MQTT_PORT: "1883"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     depends_on:
       kafka: { condition: service_healthy }
+      emqx: { condition: service_healthy }
 
   stream-processor:
     build: { context: ../.., dockerfile: services/stream-processor/Dockerfile }

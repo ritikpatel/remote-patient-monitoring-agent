@@ -165,12 +165,33 @@ def test_a_new_high_severity_alert_attempts_sms_dry_run_by_default(monkeypatch):
     assert "ICUStay/30" in sms["text"]
 
 
-def test_a_new_low_severity_alert_does_not_attempt_sms():
+def test_a_new_high_severity_alert_attempts_email_dry_run_by_default(monkeypatch):
+    """Email shares SMS's trigger and default -- both attempted, both
+    dry-run unless their own *_MODE=live is set."""
+    monkeypatch.delenv("EMAIL_MODE", raising=False)
+    resp = client.post(
+        "/alerts",
+        json={
+            "patient_ref": "ICUStay/33",
+            "alert_type": "news2_high",
+            "severity": "high",
+            "message": "NEWS2=9: single red parameter",
+        },
+    )
+    mail = resp.json()["notification"]["email"]
+    assert mail["mode"] == "dry_run"
+    assert mail["sent"] is False
+    assert "ICUStay/33" in mail["body"]
+
+
+def test_a_new_low_severity_alert_does_not_attempt_email_or_sms():
     resp = client.post(
         "/alerts",
         json={"patient_ref": "ICUStay/31", "alert_type": "t", "severity": "low", "message": "m"},
     )
-    assert resp.json()["notification"]["sms"] is None
+    notification = resp.json()["notification"]
+    assert notification["sms"] is None
+    assert notification["email"] is None
 
 
 def test_a_dedup_repeat_does_not_attempt_a_second_sms():

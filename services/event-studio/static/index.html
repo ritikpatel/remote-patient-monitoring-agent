@@ -52,6 +52,10 @@
  .step.err .dot{background:var(--crit)} .step.pending .dot{background:var(--warn)}
  .step b{font-family:var(--mono);min-width:120px}
  .step span{color:var(--muted)}
+ select{padding:7px 10px;border:1px solid var(--line);border-radius:4px;
+        background:var(--bg);color:var(--ink);font-family:var(--mono);font-size:13px}
+ .agentnote{font-size:12px;color:var(--muted);max-width:60ch}
+ .summary{font:14px/1.55 system-ui,-apple-system,sans-serif;white-space:pre-wrap}
 </style>
 </head>
 <body>
@@ -63,8 +67,10 @@
   </div>
   <div class="warnbar"><strong>Synthetic drill.</strong> Every value here is generated, watermarked
   <code>synthetic</code> on the wire, and describes no real patient. "Generate" never sends anything
-  anywhere. SMS defaults to dry-run and is only ever sent by notification-gateway, and only after
-  "Send to pipeline" causes a real alert-service escalation &mdash; never from this preview.</div>
+  anywhere. Email and SMS both default to dry-run and are only ever sent by notification-gateway, and
+  only after "Send to pipeline" causes a real alert-service escalation &mdash; never from this preview.
+  Email is the channel this demo actually sends (an SMTP account is free to set up); SMS stays wired
+  and configurable for whenever a Twilio account exists.</div>
 
   <div class="panel">
     <div class="row">
@@ -79,6 +85,11 @@
       <button id="gen">Generate</button>
       <button id="send" disabled>Send to pipeline</button>
     </div>
+    <div class="row">
+      <label for="realpt">Also assess</label>
+      <select id="realpt"><option value="">&mdash; synthetic only, no agent-orchestrator call &mdash;</option></select>
+    </div>
+    <p class="agentnote" id="agentnote" hidden></p>
     <p class="muted" id="status">Move the slider, then Generate. Nothing is sent until you press Send.</p>
   </div>
 
@@ -89,11 +100,22 @@
       <div style="flex:1"><div class="k muted">Escalation</div><div id="why">&mdash;</div></div>
     </div>
     <div class="grid" id="vals"></div>
+    <div id="emailbox" hidden><div class="k muted" style="margin-bottom:5px">Email preview &mdash; text only, nothing sent yet</div>
+      <pre id="email"></pre></div>
     <div id="smsbox" hidden><div class="k muted" style="margin-bottom:5px">SMS preview &mdash; text only, nothing sent yet</div>
       <pre id="sms"></pre></div>
     <div id="pipebox" hidden>
-      <div class="k muted" style="margin-bottom:8px">Real pipeline result &mdash; risk-engine &rarr; alert-service &rarr; notification-gateway (SMS included)</div>
+      <div class="k muted" style="margin-bottom:8px">Real pipeline result &mdash; risk-engine &rarr; alert-service &rarr; notification-gateway (email + SMS)</div>
       <div class="steps" id="steps"></div>
+    </div>
+    <div id="agentbox" hidden>
+      <div class="k muted" style="margin-bottom:8px">On-demand agent-orchestrator assessment &mdash; this real patient's own chart, independent of the composed vitals above</div>
+      <div class="verdict" id="agentverdict">
+        <div><div class="k muted">Agent escalate</div><div class="big" id="agentescalate">&mdash;</div></div>
+        <div style="flex:1"><div class="k muted">Reason</div><div id="agentreason">&mdash;</div></div>
+      </div>
+      <div class="k muted" style="margin:10px 0 4px">LLM summary (advisory only &mdash; never gates the policy verdict above)</div>
+      <div class="summary" id="agentsummary"></div>
     </div>
   </div>
 </div>
@@ -116,27 +138,74 @@ $("rand").onclick=()=>{ // biased high: a drill is more useful when it fires
 $("gen").onclick=()=>go(false);
 $("send").onclick=()=>go(true);
 
+// Populated from GET /patients: the demo cohort's real stays, each with a real
+// (stay_id, hour). Picking one is what makes "Send to pipeline" also call
+// agent-orchestrator for that stay's actual chart -- see realPatient() below
+// and app.py's _agent_assessment(). Left on "synthetic only", nothing changes
+// versus before this existed.
+async function loadPatients(){
+  try{
+    const pts=await(await fetch("/patients")).json();
+    const sel=$("realpt");
+    for(const p of pts){
+      const o=document.createElement("option");
+      o.value=`${p.stay_id}:${p.hour}`;
+      o.textContent=`${p.patient_ref} — NEWS2 ${p.news2} (${p.news2_tier_icu}) @ hour ${p.hour}`;
+      sel.appendChild(o);
+    }
+  }catch(e){/* risk-engine not up yet -- picker just stays "synthetic only" */}
+}
+function realPatient(){
+  const v=$("realpt").value;
+  if(!v)return null;
+  const[stay_id,hour]=v.split(":").map(Number);
+  return{stay_id,hour};
+}
+$("realpt").onchange=()=>{
+  const rp=realPatient();
+  const note=$("agentnote");
+  if(rp){note.hidden=false;
+    note.textContent=`Send will also call agent-orchestrator for ${$("realpt").selectedOptions[0].textContent.split(" — ")[0]}'s own chart at hour ${rp.hour} — a second, independent question from the composed vitals above, not the agent reasoning about them.`;
+  } else note.hidden=true;
+};
+loadPatients();
+
 async function go(send){
   $("status").textContent=send?"Sending…":"Generating…";
+  const rp=send?realPatient():null;
+  const body={severity:sevVal(),patient_ref:$("pt").value,send:send};
+  if(rp){body.stay_id=rp.stay_id;body.hour=rp.hour;}
   const r=await fetch("/event",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({severity:sevVal(),patient_ref:$("pt").value,send:send})});
+    body:JSON.stringify(body)});
   const d=await r.json();last=d;render(d,send);
+}
+function agentStep(p,out){
+  // Independent of every branch below -- agent-orchestrator is only reached
+  // when a real patient was picked (app.py's _agent_assessment), and runs
+  // regardless of whether the composed vitals themselves escalated.
+  const a=p.agent_assessment;
+  if(!a)return;
+  if(a.error){out.push({s:"err",l:"agent-orchestrator",d:a.error});return;}
+  out.push({s:"ok",l:"agent-orchestrator",d:
+    `${a.patient_ref} @ hour ${a.hour} — ${a.escalate?"agent recommends escalation":"no escalation"}`
+    +(a.escalation_reason?` (${a.escalation_reason})`:"")});
 }
 function pipelineSteps(p){
   const out=[];
   if(!p)return out;
-  if(!p.scored){out.push({s:"err",l:"risk-engine",d:p.error||"scoring failed"});return out;}
+  if(!p.scored){out.push({s:"err",l:"risk-engine",d:p.error||"scoring failed"});agentStep(p,out);return out;}
   out.push({s:"ok",l:"risk-engine",d:
     `NEWS2 ${p.score.news2} — ${p.score.escalation_recommended?"escalation recommended":"no escalation"}`
     +(p.score.escalation_reason?` (${p.score.escalation_reason})`:"")});
   if(!p.escalated){
     out.push({s:"skip",l:"alert-service",d:"not called — did not escalate"});
     out.push({s:"skip",l:"notification",d:"not called"});
+    agentStep(p,out);
     return out;
   }
   const a=p.alert||{};
   if(p.error||!p.alert){out.push({s:"err",l:"alert-service",d:p.error||"no response"});
-    out.push({s:"skip",l:"notification",d:"not reached"});return out;}
+    out.push({s:"skip",l:"notification",d:"not reached"});agentStep(p,out);return out;}
   out.push({s:"ok",l:"alert-service",d:a.was_new
     ?`new alert raised (id ${a.alert&&a.alert.id})`
     :"deduped — same 4-hourly bucket as an existing alert (R6)"});
@@ -146,14 +215,20 @@ function pipelineSteps(p){
   else if(n.error)out.push({s:"err",l:"notification",d:n.error});
   else{
     out.push({s:"ok",l:"notification",d:`channels: ${(n.channels||[]).join(", ")}`+(n.pushed?" · pushed":"")});
+    const mail=n.email;
+    if(!mail)out.push({s:"skip",l:"email",d:"not attempted — below the paging severity bar"});
+    else if(mail.sent)out.push({s:"ok",l:"email",d:`sent to ${mail.to}`});
+    else if(mail.mode==="dry_run")out.push({s:"pending",l:"email",d:`dry-run — would send to ${mail.to||"(CLINICIAN_EMAIL unset)"}`});
+    else out.push({s:"err",l:"email",d:mail.error||"not sent"});
     const sms=n.sms;
-    if(!sms)out.push({s:"skip",l:"sms",d:"not attempted — below the SMS severity bar"});
+    if(!sms)out.push({s:"skip",l:"sms",d:"not attempted — below the paging severity bar"});
     else if(sms.sent)out.push({s:"ok",l:"sms",d:`sent to ${sms.to} (sid ${sms.provider_sid})`});
     else if(sms.mode==="dry_run")out.push({s:"pending",l:"sms",d:`dry-run — would send to ${sms.to||"(CLINICIAN_PHONE unset)"}`});
     else out.push({s:"err",l:"sms",d:sms.error||"not sent"});
   }
   if(p.context_passages)out.push({s:"ok",l:"rag-service",d:`${p.context_passages.length} context passage(s) retrieved`});
   else if(p.context_error)out.push({s:"err",l:"rag-service",d:p.context_error});
+  agentStep(p,out);
   return out;
 }
 function render(d,sent){
@@ -166,6 +241,8 @@ function render(d,sent){
     return `<div class="cell"><div class="k">${k} ${badge}</div>
             <div class="v">${v}<span class="k"> ${UNITS[k]||""}</span></div></div>`;}).join("");
   $("send").disabled=false;
+  if(d.email_preview){$("emailbox").hidden=false;$("email").textContent=d.email_preview;}
+  else $("emailbox").hidden=true;
   if(d.sms_preview){$("smsbox").hidden=false;$("sms").textContent=d.sms_preview;}
   else $("smsbox").hidden=true;
   const steps=pipelineSteps(d.pipeline);
@@ -174,6 +251,15 @@ function render(d,sent){
     $("steps").innerHTML=steps.map(x=>
       `<div class="step ${x.s}"><span class="dot"></span><b>${esc(x.l)}</b><span>${esc(x.d)}</span></div>`).join("");
   } else $("pipebox").hidden=true;
+  const aa=d.pipeline&&d.pipeline.agent_assessment;
+  if(aa&&!aa.error){
+    $("agentbox").hidden=false;
+    $("agentverdict").className="verdict"+(aa.escalate?" fire":"");
+    $("agentescalate").textContent=aa.escalate?"YES":"no";
+    $("agentreason").textContent=aa.escalation_reason||"—";
+    $("agentsummary").textContent=[aa.summary,aa.llm_advisory&&`Advisory: ${aa.llm_advisory}`]
+      .filter(Boolean).join("\n\n")||"(no LLM configured for this run — policy verdict above still real)";
+  } else $("agentbox").hidden=true;
   $("status").textContent=sent
     ?(d.sent?`Sent to ingest-gateway (HTTP ${d.gateway_status}).`
             :`Not sent — ${d.gateway_error||("gateway HTTP "+d.gateway_status)}`)

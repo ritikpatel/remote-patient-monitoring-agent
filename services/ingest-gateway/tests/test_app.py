@@ -99,3 +99,32 @@ def test_handle_mqtt_message_rejects_malformed_payload():
 
     with pytest.raises(pydantic.ValidationError):
         handle_mqtt_message("some/topic", b"not json")
+
+
+# --------------------------------------------------------------------------
+# MQTT subscriber wiring: MQTT_HOST gates it exactly the way
+# KAFKA_BOOTSTRAP_SERVERS gates stream-processor's consumer thread -- unset in
+# every test here, so these check the gate itself, not a live connection.
+# --------------------------------------------------------------------------
+
+
+def test_mqtt_stats_disabled_by_default():
+    assert client.get("/mqtt/stats").json() == {
+        "enabled": False,
+        "reason": "MQTT_HOST is not set",
+    }
+
+
+def test_build_mqtt_subscriber_returns_none_without_mqtt_host(monkeypatch):
+    monkeypatch.delenv("MQTT_HOST", raising=False)
+    assert _module._build_mqtt_subscriber() is None
+
+
+def test_build_mqtt_subscriber_reads_host_and_port_from_env(monkeypatch):
+    monkeypatch.setenv("MQTT_HOST", "emqx")
+    monkeypatch.setenv("MQTT_PORT", "1883")
+    sub = _module._build_mqtt_subscriber()
+    assert sub is not None
+    assert sub.config.host == "emqx"
+    assert sub.config.port == 1883
+    assert sub.config.topic_filter == "capstone/observations/#"

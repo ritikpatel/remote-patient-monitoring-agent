@@ -11,16 +11,32 @@ async Kafka path.** Posting to `ingest-gateway` still happens, for the same
 audit trail and Kafka-consumer path every other producer gets, but the HTTP
 response you get back does not wait on that async path -- instead this calls
 risk-engine, alert-service (which itself calls notification-gateway, which
-sends SMS) and rag-service directly, in the same order the streaming path
-uses, and returns what actually happened. See `_pipeline()` below and
-`services/stream-processor/escalation.py`'s `EscalationLoop.run_now`, which
-this reuses rather than reimplementing.
+sends email and/or SMS) and rag-service directly, in the same order the
+streaming path uses, and returns what actually happened. See `_pipeline()`
+below and `services/stream-processor/escalation.py`'s `EscalationLoop.run_now`,
+which this reuses rather than reimplementing.
 
-SMS is never sent from a "Generate" click, only ever as a real consequence of
-a real alert-service escalation reached via "Send to pipeline" -- see
-`services/common/sms.py`'s module docstring for why that module has exactly
-one real sender left (notification-gateway) and this service only composes a
-preview.
+Neither email nor SMS is ever sent from a "Generate" click, only ever as a
+real consequence of a real alert-service escalation reached via "Send to
+pipeline" -- see `services/common/email.py` and `services/common/sms.py`'s
+module docstrings for why those modules have exactly one real sender left
+(notification-gateway) and this service only composes a preview of each.
+
+**Optionally, also the on-demand agentic path -- for a real demo patient only.**
+`_pipeline()`'s own docstring explains why the composed, synthetic vitals never
+drive `agent-orchestrator`: its nodes read a real warehouse `(stay_id, hour)`
+that a browser-composed patient does not have. That constraint is about the
+*composed vitals*, not about whether this service can reach agent-orchestrator
+at all -- `GET /patients` (proxying risk-engine, which already owns the
+warehouse) lists the demo cohort's real stays, each with a real `(stay_id,
+hour)`. When the operator picks one of those, "Send to pipeline" also calls
+`agent-orchestrator POST /run` for that real stay, exactly the same call
+`clinician-api` makes when a clinician opens that patient's chart -- see
+`_agent_assessment()`. This runs *alongside*, not *instead of*, the fast
+vitals path above: the two are independent questions ("does this composed
+event escalate?" vs "what does this real patient's own chart say right now?")
+and are reported separately so the two are never conflated as if the agent
+had reasoned about the synthetic vitals.
 
     uvicorn app:app --app-dir services/event-studio --port 8009
 """
@@ -49,7 +65,7 @@ sys.path.insert(0, str(REPO_ROOT / "services" / "stream-processor"))
 import duckdb  # noqa: E402
 from escalation import EscalationLoop  # noqa: E402
 from generator import generate  # noqa: E402
-from services.common import sms  # noqa: E402
+from services.common import email, sms  # noqa: E402
 from services.contracts.observation import Observation, ObservationSource, QualityFlag  # noqa: E402
 from simulators.sinks import DEFAULT_INGEST_API_KEY  # noqa: E402
 from warehouse.news2 import load_thresholds, should_escalate, tier_for_score  # noqa: E402
@@ -62,10 +78,15 @@ GATEWAY_URL = os.environ.get("INGEST_GATEWAY_URL", "http://localhost:8000")
 API_KEY = os.environ.get("INGEST_API_KEY", DEFAULT_INGEST_API_KEY)
 # The same three real services EscalationLoop calls, plus rag-service for the
 # context passages the agent's ContextRetriever would otherwise supply -- see
-# _pipeline()'s docstring for why the full agent graph is not called instead.
+# _pipeline()'s docstring for why the full agent graph is not called for the
+# composed vitals themselves.
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8001")
 ALERT_SERVICE_URL = os.environ.get("ALERT_SERVICE_URL", "http://localhost:8005")
 RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8004")
+# Only reached for a real demo patient (see GET /patients, _agent_assessment) --
+# never for the composed synthetic vitals. Same default port RUNBOOK.md and
+# every other service use for agent-orchestrator.
+AGENT_ORCHESTRATOR_URL = os.environ.get("AGENT_ORCHESTRATOR_URL", "http://localhost:8008")
 
 app = FastAPI(title="event-studio")
 STATIC = Path(__file__).resolve().parent / "static"
@@ -79,6 +100,8 @@ STATIC = Path(__file__).resolve().parent / "static"
 _pipeline_client: httpx.Client | None = None
 _rag_client: httpx.Client | None = None
 _gateway_client: httpx.Client | None = None
+_patients_client: httpx.Client | None = None
+_agent_client: httpx.Client | None = None
 
 
 def set_pipeline_client(client: httpx.Client | None) -> None:
@@ -94,6 +117,16 @@ def set_rag_client(client: httpx.Client | None) -> None:
 def set_gateway_client(client: httpx.Client | None) -> None:
     global _gateway_client
     _gateway_client = client
+
+
+def set_patients_client(client: httpx.Client | None) -> None:
+    global _patients_client
+    _patients_client = client
+
+
+def set_agent_client(client: httpx.Client | None) -> None:
+    global _agent_client
+    _agent_client = client
 
 
 _thresholds = None
@@ -121,6 +154,12 @@ class EventRequest(BaseModel):
     patient_ref: str = "Patient/10005866"
     seed: int | None = None
     send: bool = False
+    # Set together, from GET /patients, to also drive agent-orchestrator's real
+    # on-demand path for a real demo stay -- see _agent_assessment(). Left unset
+    # (the default), behaviour is exactly what it always was: composed vitals
+    # only, no agent-orchestrator call.
+    stay_id: int | None = None
+    hour: int | None = None
 
 
 @app.get("/health")
@@ -138,6 +177,26 @@ def health() -> dict:
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
+
+
+@app.get("/patients")
+def list_patients() -> list[dict]:
+    """The demo cohort's real stays, each with a real `(stay_id, hour)` --
+    proxies risk-engine's own `/patients` (the warehouse's owner) rather than
+    reading the warehouse a second time here. Populates the UI's "real demo
+    patient" picker; selecting one is what lets "Send to pipeline" also reach
+    agent-orchestrator (see _agent_assessment()) instead of only the fast
+    vitals path.
+    """
+    owns_client = _patients_client is None
+    risk_client = _patients_client or httpx.Client(base_url=RISK_ENGINE_URL, timeout=10)
+    try:
+        r = risk_client.get("/patients")
+        r.raise_for_status()
+        return list(r.json())
+    finally:
+        if owns_client:
+            risk_client.close()
 
 
 def _observations(ev, patient_ref: str) -> list[Observation]:
@@ -207,6 +266,48 @@ def _pipeline(patient_ref: str, vitals: dict, why: str) -> dict:
     return result
 
 
+def _agent_assessment(stay_id: int, hour: int) -> dict:
+    """Call agent-orchestrator's `/run` for a real demo stay -- the exact same
+    call clinician-api makes for `POST /patients/{stay}/{hour}/assessment` when
+    a clinician opens that patient's chart (RUNBOOK.md). This is deliberately a
+    second, independent question from `_pipeline()`'s: it reasons over the
+    *real* warehouse row at `(stay_id, hour)`, not over whatever vitals this
+    event composed, and it runs regardless of whether the composed vitals
+    escalated -- an on-demand assessment is not conditioned on this event's own
+    alert, the same as the real system (workflow_simple.md's "on-demand, not in
+    this path" note).
+    """
+    patient_ref = f"ICUStay/{stay_id}"
+    owns_client = _agent_client is None
+    agent_client = _agent_client or httpx.Client(base_url=AGENT_ORCHESTRATOR_URL, timeout=30)
+    try:
+        r = agent_client.post(
+            "/run", json={"stay_id": stay_id, "hour": hour, "patient_ref": patient_ref}
+        )
+        r.raise_for_status()
+        body = r.json()
+        return {
+            "stay_id": stay_id,
+            "hour": hour,
+            "patient_ref": patient_ref,
+            "escalate": body.get("escalate"),
+            "escalation_reason": body.get("escalation_reason"),
+            "llm_advisory": body.get("llm_advisory"),
+            "summary": body.get("summary"),
+            "risk_score": body.get("risk_score"),
+        }
+    except httpx.HTTPError as exc:
+        return {
+            "stay_id": stay_id,
+            "hour": hour,
+            "patient_ref": patient_ref,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        if owns_client:
+            agent_client.close()
+
+
 @app.post("/event")
 def make_event(req: EventRequest) -> dict:
     ev = generate(req.severity, seed=req.seed)
@@ -238,10 +339,14 @@ def make_event(req: EventRequest) -> dict:
         "would_escalate": bool(escalates),
         "why": why,
         "sent": False,
-        # Text only, zero network calls, no guard evaluated -- sms.compose()
-        # cannot send anything. What the real pipeline would say once escalated
-        # is `pipeline.alert.notification.sms` below, populated only when this
-        # event is actually sent and actually escalates for real.
+        # Text only, zero network calls, no guard evaluated -- email.compose()/
+        # sms.compose() cannot send anything. What the real pipeline would say
+        # once escalated is `pipeline.alert.notification.{email,sms}` below,
+        # populated only when this event is actually sent and actually
+        # escalates for real.
+        "email_preview": (
+            email.compose(req.patient_ref, f"NEWS2 {ev.news2}", why).body if escalates else None
+        ),
         "sms_preview": (
             sms.compose(req.patient_ref, f"NEWS2 {ev.news2}", why) if escalates else None
         ),
@@ -271,6 +376,13 @@ def make_event(req: EventRequest) -> dict:
     # Realtime: score, alert and notify right now, synchronously, against the
     # same real services -- independent of whether the async Kafka path above
     # succeeded, since the vitals are already in hand either way.
-    result["pipeline"] = _pipeline(req.patient_ref, {**ev.values, **ev.extras}, why)
+    pipeline_result = _pipeline(req.patient_ref, {**ev.values, **ev.extras}, why)
 
+    # A real demo patient was picked (GET /patients): also run the on-demand
+    # agentic path for that stay's actual chart -- see _agent_assessment()'s
+    # docstring for why this is independent of, not gated on, the line above.
+    if req.stay_id is not None and req.hour is not None:
+        pipeline_result["agent_assessment"] = _agent_assessment(req.stay_id, req.hour)
+
+    result["pipeline"] = pipeline_result
     return result

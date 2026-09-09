@@ -37,7 +37,8 @@ flowchart TD
 
     S5A["Dashboard\nlive WebSocket broadcast\nto the clinician's browser"]
     S5B["Push notification\nFCM to the clinician's phone"]
-    S5C["SMS — only if severity = high\nservices/common/sms.py, guarded:\ndry-run unless SMS_MODE=live,\nforces [SYNTHETIC DRILL]"]
+    S5C["Email — only if severity = high\nservices/common/email.py, guarded:\ndry-run unless EMAIL_MODE=live,\nforces [SYNTHETIC DRILL]\n(live-demonstrated: SMTP, free)"]
+    S5D["SMS — only if severity = high\nservices/common/sms.py, guarded:\ndry-run unless SMS_MODE=live,\nforces [SYNTHETIC DRILL]\n(wired, configurable: needs Twilio)"]
 
     ALERT(["ALERT DELIVERED"])
 
@@ -48,8 +49,8 @@ flowchart TD
     D1 -->|yes| S3 --> D2
     D2 -->|no, deduped| DEDUP
     D2 -->|yes| S4
-    S4 --> S5A & S5B & S5C
-    S5A & S5B & S5C --> ALERT
+    S4 --> S5A & S5B & S5C & S5D
+    S5A & S5B & S5C & S5D --> ALERT
     ALERT -.-> SIDE
 
     classDef startend fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px;
@@ -58,7 +59,8 @@ flowchart TD
     classDef decision fill:#fff7ed,stroke:#ea580c,color:#7c2d12,stroke-width:2px;
     classDef stop fill:#f3f4f6,stroke:#9ca3af,color:#1f2937;
     classDef channel fill:#cffafe,stroke:#0891b2,color:#164e63;
-    classDef sms fill:#fdf4ff,stroke:#c026d3,color:#701a75;
+    classDef email fill:#ecfdf5,stroke:#059669,color:#064e3b,stroke-width:2px;
+    classDef sms fill:#fdf4ff,stroke:#c026d3,color:#701a75,stroke-dasharray: 3 3;
     classDef side fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-dasharray: 4 2;
     classDef final fill:#dc2626,stroke:#7f1d1d,color:#ffffff,stroke-width:3px;
 
@@ -68,7 +70,8 @@ flowchart TD
     class NOFIRE,DEDUP stop;
     class S3,S4 alertstep;
     class S5A,S5B channel;
-    class S5C sms;
+    class S5C email;
+    class S5D sms;
     class ALERT final;
     class SIDE side;
 ```
@@ -85,19 +88,38 @@ flowchart TD
 2. **A genuinely new alert vs. a dedup repeat — alert-service, aligned to the
    4-hourly clock (R6).** A repeat within the same bucket increments the
    existing alert's `repeat_count` and stops there: no second dashboard
-   broadcast, no second push, no second SMS. This used to not be quite true —
-   see the fuller diagram's note on finding F7, a real double-notification
-   bug found while wiring SMS into this exact path.
+   broadcast, no second push, no second email or SMS. This used to not be
+   quite true — see the fuller diagram's note on finding F7, a real
+   double-notification bug found while wiring paging into this exact path.
 
-## Why SMS is conditional on severity, not on "an alert exists"
+## Two paging channels, one trigger, different credentials
 
-Every alert this pipeline raises today is severity `"high"` by construction
-(`EscalationLoop`'s `ALERT_TYPE`), so in practice every real alert reaches the
-SMS check — but the condition is evaluated on the notification's own severity
-field, not assumed, so a future lower-severity alert type would correctly
-skip paging a phone for it. It is also dry-run by default regardless: nothing
-sends anywhere until `SMS_MODE=live` is set, and every message is forced to
-carry `[SYNTHETIC DRILL]` — see [`services/common/sms.py`](../services/common/sms.py).
+Email and SMS share the identical design: attempted independently and
+unconditionally whenever a notification's severity is `"high"` (every alert
+this pipeline raises today, by construction — `EscalationLoop`'s
+`ALERT_TYPE`), dry-run by default regardless (nothing sends anywhere until
+`EMAIL_MODE` / `SMS_MODE=live` is explicitly set), every message forced to
+carry `[SYNTHETIC DRILL]`. Neither is "instead of" the other in code — which
+one an operator actually sees fire is a credentials question:
+
+- **Email** ([`services/common/email.py`](../services/common/email.py)) is
+  the channel this project demonstrates live. It needs only a free SMTP
+  account — a Gmail address and an app password covers it, no billing.
+- **SMS** ([`services/common/sms.py`](../services/common/sms.py)) stays
+  wired and independently configurable for whenever a funded Twilio account
+  exists — nothing in the code favours one over the other.
+
+## The SIDE box, made clickable for a real demo patient
+
+The diagram's on-demand box stays on-demand for a real event's own journey —
+no production alert waits on an LLM call. `event-studio` (the box this
+diagram's `START` node already mentions) can still reach it from the same
+click, for a real demo patient specifically: picking one of the 100 real
+stays additionally calls `agent-orchestrator POST /run` for that stay's real
+chart, independent of whether the composed event above escalated. It is
+still never in the alert path — same `should_escalate()`, never the reverse
+— just no longer only reachable by hand. See
+[`services/event-studio/README.md`](../services/event-studio/README.md).
 
 For the full component inventory — every producer, the async Kafka path
 alongside this synchronous one, the agentic reasoning path, FHIR export, and

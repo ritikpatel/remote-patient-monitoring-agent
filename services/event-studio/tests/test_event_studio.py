@@ -7,6 +7,7 @@ moved there (it now has two real callers, not one).
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -40,6 +41,8 @@ def _reset_injected_clients():
     app_mod.set_pipeline_client(None)
     app_mod.set_rag_client(None)
     app_mod.set_gateway_client(None)
+    app_mod.set_patients_client(None)
+    app_mod.set_agent_client(None)
 
 
 @pytest.mark.parametrize("severity", [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
@@ -94,6 +97,26 @@ def test_sms_preview_is_text_only_and_never_a_real_send_attempt(monkeypatch):
     assert d["would_escalate"] is True
     assert isinstance(d["sms_preview"], str)
     assert "SYNTHETIC DRILL" in d["sms_preview"]
+    assert d["pipeline"] is None  # the real pipeline was never touched
+
+
+@needs_warehouse
+def test_email_preview_is_text_only_and_never_a_real_send_attempt(monkeypatch):
+    """Same safety property as the SMS preview, for the channel this project
+    actually demonstrates live: a 'Generate' click must be incapable of
+    sending a real email even if EMAIL_MODE=live happens to be set."""
+    monkeypatch.setenv("EMAIL_MODE", "live")
+    monkeypatch.setenv("CLINICIAN_EMAIL", "clinician@example.com")
+    monkeypatch.setenv("SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("SMTP_USERNAME", "should-never-be-used@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "should-never-be-used")
+    monkeypatch.setenv("SMTP_FROM_ADDRESS", "should-never-be-used@example.com")
+
+    d = client.post("/event", json={"severity": 1.0, "seed": 3, "send": False}).json()
+    assert d["would_escalate"] is True
+    assert isinstance(d["email_preview"], str)
+    assert "SYNTHETIC DRILL" in d["email_preview"]
     assert d["pipeline"] is None  # the real pipeline was never touched
 
 
@@ -231,3 +254,135 @@ def test_send_proceeds_to_the_pipeline_even_if_the_gateway_post_fails():
     assert d["sent"] is False
     assert "gateway_error" in d
     assert d["pipeline"]["scored"] is True  # still ran
+
+
+# --- Real-patient mode: also reaching agent-orchestrator --------------------
+# Picking a real demo stay (GET /patients) is what lets one "Send to pipeline"
+# exercise agent-orchestrator too -- independent of the fast vitals path above,
+# per _agent_assessment()'s docstring.
+
+
+def test_list_patients_proxies_risk_engine():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/patients"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "stay_id": 34617352,
+                    "patient_ref": "ICUStay/34617352",
+                    "hour": 35,
+                    "news2": 9,
+                    "news2_tier_icu": "high",
+                    "sofa_24h": 4,
+                }
+            ],
+        )
+
+    app_mod.set_patients_client(
+        httpx.Client(base_url="http://risk-engine.test", transport=httpx.MockTransport(handler))
+    )
+    resp = client.get("/patients")
+    assert resp.status_code == 200
+    assert resp.json()[0]["stay_id"] == 34617352
+
+
+@needs_warehouse
+def test_send_without_a_real_patient_never_calls_agent_orchestrator():
+    """Regression guard: the default (no stay_id/hour) must behave exactly as
+    it always did -- agent-orchestrator untouched."""
+    agent_calls = []
+
+    def agent_handler(request: httpx.Request) -> httpx.Response:
+        agent_calls.append(request.url.path)
+        raise AssertionError("agent-orchestrator must not be called without a real patient")
+
+    def pipeline_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"news2": 0, "escalation_recommended": False})
+
+    app_mod.set_gateway_client(_gateway_ok_client())
+    app_mod.set_pipeline_client(httpx.Client(transport=httpx.MockTransport(pipeline_handler)))
+    app_mod.set_agent_client(
+        httpx.Client(
+            base_url="http://agent-orchestrator.test", transport=httpx.MockTransport(agent_handler)
+        )
+    )
+
+    d = client.post("/event", json={"severity": 0.0, "seed": 8, "send": True}).json()
+
+    assert agent_calls == []
+    assert "agent_assessment" not in d["pipeline"]
+
+
+@needs_warehouse
+def test_send_with_a_real_patient_also_calls_agent_orchestrator_even_without_escalation():
+    """Independence, proven both ways: a *low*-severity composed event (no
+    fast-path escalation) still reaches agent-orchestrator when a real stay is
+    selected -- the on-demand assessment is not conditioned on this event's
+    own alert."""
+    agent_calls = []
+
+    def agent_handler(request: httpx.Request) -> httpx.Response:
+        agent_calls.append(request.url.path)
+        assert request.url.path == "/run"
+        body = json.loads(request.content)
+        assert body == {"stay_id": 34617352, "hour": 35, "patient_ref": "ICUStay/34617352"}
+        return httpx.Response(
+            200,
+            json={
+                "escalate": True,
+                "escalation_reason": "aggregate tier 'high'",
+                "llm_advisory": "Consider repeat lactate.",
+                "summary": "Patient trending toward sepsis criteria over the last 4 hours.",
+                "risk_score": {"news2": 11},
+            },
+        )
+
+    def pipeline_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"news2": 0, "escalation_recommended": False})
+
+    app_mod.set_gateway_client(_gateway_ok_client())
+    app_mod.set_pipeline_client(httpx.Client(transport=httpx.MockTransport(pipeline_handler)))
+    app_mod.set_agent_client(
+        httpx.Client(
+            base_url="http://agent-orchestrator.test", transport=httpx.MockTransport(agent_handler)
+        )
+    )
+
+    d = client.post(
+        "/event",
+        json={"severity": 0.0, "seed": 9, "send": True, "stay_id": 34617352, "hour": 35},
+    ).json()
+
+    assert agent_calls == ["/run"]
+    assert d["pipeline"]["escalated"] is False  # the fast path's own answer, unaffected
+    aa = d["pipeline"]["agent_assessment"]
+    assert aa["stay_id"] == 34617352
+    assert aa["patient_ref"] == "ICUStay/34617352"
+    assert aa["escalate"] is True
+    assert aa["summary"].startswith("Patient trending")
+
+
+@needs_warehouse
+def test_agent_assessment_reports_an_error_without_failing_the_rest_of_the_response():
+    def failing_agent(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    def pipeline_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"news2": 0, "escalation_recommended": False})
+
+    app_mod.set_gateway_client(_gateway_ok_client())
+    app_mod.set_pipeline_client(httpx.Client(transport=httpx.MockTransport(pipeline_handler)))
+    app_mod.set_agent_client(
+        httpx.Client(
+            base_url="http://agent-orchestrator.test", transport=httpx.MockTransport(failing_agent)
+        )
+    )
+
+    d = client.post(
+        "/event",
+        json={"severity": 0.0, "seed": 10, "send": True, "stay_id": 34617352, "hour": 35},
+    ).json()
+
+    assert d["pipeline"]["scored"] is True  # unaffected by the agent-orchestrator failure
+    assert "error" in d["pipeline"]["agent_assessment"]

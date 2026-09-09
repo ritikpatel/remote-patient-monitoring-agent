@@ -579,10 +579,49 @@ context) returns in one HTTP response instead of requiring a separate poll.
 Verified against six real running services, including that a same-bucket
 resubmit correctly produces zero further alert/notify/SMS calls.
 
+**Later the same day: email added as a second, independently-guarded paging
+channel** (`services/common/email.py`, mirroring `sms.py`'s four guards
+exactly), made the one this project demonstrates live because it needs only
+a free SMTP account rather than a funded Twilio one; SMS stayed wired and
+equally real, not demoted. Both are attempted, independently, on every
+high-severity notification.
+
+**F8 — the MQTT ingress gap, closed.** `edge_agent`'s `MqttPublisher` always
+worked against a real broker; `ingest-gateway`'s `handle_mqtt_message` was
+always real, tested code; nothing in between ever ran a live subscription
+connecting the two, a gap this report (and `docs/workflow.md`) had
+documented but not fixed. `mqtt_subscriber.py` is a `paho-mqtt` client
+gated on `MQTT_HOST`, mirroring `stream-processor`'s Kafka-consumer-thread
+gating on `KAFKA_BOOTSTRAP_SERVERS` exactly (idle in every test and any
+standalone run; started by `infra/compose/docker-compose.yml`'s `emqx`
+service alone). Verified end to end against a real EMQX broker, twice: once
+via pytest (`services/ingest-gateway/tests/test_mqtt_subscriber.py`, which
+self-skips without a reachable broker the same way the Kafka consumer's own
+end-to-end test does), and once by hand — `edge_agent`'s CLI publishing 24
+observations over real MQTT, `GET /mqtt/stats` showing `messages_received:
+24, errors: 0`, and the same real `Publisher` the REST path uses receiving
+all 24 (`RUNBOOK.md` step 6f-bis).
+
+**Also the same day: `event-studio` gained an optional, second, independent
+path into `agent-orchestrator`.** Composed vitals still never reach the
+agent graph (`_pipeline()`'s docstring: agent-orchestrator's nodes need a
+real warehouse `(stay_id, hour)` a browser-composed patient does not have —
+unchanged, and not a workaround). What changed: `GET /patients` (proxying
+risk-engine) lists the demo cohort's 140 real stays, and picking one makes
+"Send to pipeline" also call `agent-orchestrator POST /run` for that real
+stay — the same call `clinician-api` makes for a clinician opening a chart —
+reported in its own panel, never merged into the composed-vitals result.
+Verified live through an actual browser against seven real running services
+(the six F7 named, plus `agent-orchestrator` with a real Groq LLM
+configured): a low-severity composed event (no fast-path escalation)
+alongside a real, critical stay correctly produced two disagreeing verdicts
+in the same response — proof the two questions stay independent rather than
+one silently standing in for the other.
+
 For orientation, not as a re-review: this review opened with **274 passed / 12
 skipped with no infra; 284 passed / 2 skipped** with Kafka+Postgres+EMQX+
 HAPI+Keycloak up (the "What I verified" table above). Re-run today, the full
-suite stands at **368 passed / 15 skipped** with no infra and **380 passed /
-3 skipped** with that same infra up — net new tests for the four components
-above and the work the appendices already describe, not a change to anything
-F1-F6 verified.
+suite stands at **402 passed / 16 skipped** with no infra and **415 passed /
+3 skipped** with that same infra up — net new tests for the components above
+and the work the appendices already describe, not a change to anything F1-F6
+verified.
