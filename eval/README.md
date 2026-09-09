@@ -61,8 +61,12 @@ some browsers) and `manual_review_sample.csv`.
 
 ## Latency axis: scope, stated plainly
 
-There is no message bus wiring these five services together yet -- Kafka/
-EMQX is Phase 8 infrastructure (PROJECT_PLAN.md section 14). `eval/load/
+At the time this axis was built there was no message bus wiring these five
+services together -- Kafka/EMQX were still Phase 8 infrastructure
+(PROJECT_PLAN.md section 14). Phase 8 has since stood up both and wired them
+for real (`infra/compose/README.md`'s "Real Kafka wiring" and "Real MQTT
+wiring" sections), so this axis's own scope choice below is no longer forced,
+just still the simpler and equally valid way to measure hop latency: `eval/load/
 ramp.js` **is** the orchestrator here: it calls each real service's real
 endpoint in sequence and times the whole chain, which is a genuine measure
 of each hop's real latency, just orchestrated synchronously by a k6 script

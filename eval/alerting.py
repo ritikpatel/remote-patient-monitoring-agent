@@ -52,14 +52,12 @@ def simulate_alert_history(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     F1 this selected ``tier_icu = 'high'`` alone, which measured only one of NEWS2's
     two escalation triggers.
     """
-    rows = conn.execute(
-        """
+    rows = conn.execute("""
         select n.stay_id, n.hour, n.tier_icu, n.max_component_nongcs, n.red_params,
                n.gcs_drop, d.icu_intime
         from capstone.news2 n
         join mimiciv_derived.icustay_detail d using (stay_id)
-        """
-    ).fetchdf()
+        """).fetchdf()
     rows = rows[
         [
             should_escalate(t, m, d)

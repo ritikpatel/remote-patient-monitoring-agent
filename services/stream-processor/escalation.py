@@ -16,6 +16,25 @@ or on demand -- not once per observation. The policy applied here is the same
 ``should_escalate`` predicate the agent's EscalationDecider uses, served by
 risk-engine's ``/score/live``, so the cheap deterministic path and the expensive
 narrative path can never disagree about whether to escalate.
+
+``run_now()`` is the second entry point: a one-shot, synchronous version of
+``on_observation()`` for a caller that already holds a complete vitals dict
+instead of a single streamed channel -- ``event-studio``'s composed events,
+not a Kafka-consumed ``Observation``. Same real services, same score -> alert
+sequence, same order, just called directly instead of triggered by a consumed
+message. See ``services/event-studio/app.py``.
+
+**This module does NOT call notification-gateway itself, and used to --
+that was a real bug, found while wiring the SMS sender in.** alert-service's
+own `POST /alerts` handler already calls notification-gateway internally on
+every genuinely new alert (`_notify_dashboard`, in `services/alert-service/
+app.py`) and, since that fix, returns the result. A second, independent call
+from here as well meant every real alert notified *twice* -- harmless for a
+WebSocket toast, but this project also wires a guarded SMS sender to fire on
+every high-severity notification (`services/common/sms.py`), and that turns
+"harmless duplicate" into "a clinician's phone gets the drill text twice."
+`_raise_alert` below now just reads `alert-service`'s own embedded
+`"notification"` field rather than requesting a second one.
 """
 
 from __future__ import annotations
@@ -65,9 +84,12 @@ class EscalationLoop:
 
     risk_engine_url: str
     alert_service_url: str
-    notification_url: str | None = None
     min_score_interval_min: float = DEFAULT_MIN_SCORE_INTERVAL_MIN
     timeout: float = 5.0
+    # Injectable for tests (an httpx.Client wired to an httpx.MockTransport, or
+    # to another service's real ASGI app) -- real callers leave this None and
+    # get a real network-calling client, exactly as before this field existed.
+    client: httpx.Client | None = None
 
     scored: int = 0
     escalated: int = 0
@@ -79,7 +101,9 @@ class EscalationLoop:
     _client: httpx.Client | None = None
 
     def __post_init__(self) -> None:
-        self._client = httpx.Client(timeout=self.timeout)
+        self._client = (
+            self.client if self.client is not None else httpx.Client(timeout=self.timeout)
+        )
 
     def close(self) -> None:
         if self._client is not None:
@@ -152,6 +176,12 @@ class EscalationLoop:
         return resp.json()
 
     def _raise_alert(self, patient_ref: str, score: dict) -> dict | None:
+        """POSTs the alert; alert-service itself calls notification-gateway on a
+        genuinely new one and embeds the result as `"notification"` in its
+        response (see the module docstring for why that call does not also
+        happen here). This method only reads that field back, never requests
+        a second one.
+        """
         assert self._client is not None
         resp = self._client.post(
             f"{self.alert_service_url.rstrip('/')}/alerts",
@@ -166,24 +196,42 @@ class EscalationLoop:
         body = resp.json()
         if body.get("was_new"):
             self.alerts_raised += 1
-            self._notify(patient_ref, body.get("alert", {}), score)
         return body
 
-    def _notify(self, patient_ref: str, alert: dict, score: dict) -> None:
-        """Best-effort push. A notification failure must not undo a raised alert --
-        the alert is already durable in alert-service; the notification is a delivery
-        channel on top of it.
+    def run_now(self, patient_ref: str, vitals: dict) -> dict:
+        """One-shot, synchronous version of ``on_observation()`` for a caller that
+        already has a complete vitals dict rather than a single streamed channel.
+
+        Skips the per-channel filter and the stream-time throttle: both exist to
+        stop a 64Hz wearable stream from triggering a scoring round trip on every
+        sample, which does not apply to a caller making one deliberate call with
+        every channel already in hand. Otherwise this is exactly
+        ``on_observation``'s score -> alert sequence, against the same real
+        services in the same order -- what "the event reaches risk-engine and
+        alert-service immediately" means concretely. alert-service notifies
+        (dashboard, push, and a high-severity SMS) internally on a new alert
+        and returns that result embedded on the alert body; it is not a
+        separate step this method takes.
         """
-        if not self.notification_url or self._client is None:
-            return
         try:
-            self._client.post(
-                f"{self.notification_url.rstrip('/')}/notify",
-                json={
-                    "patient_ref": patient_ref,
-                    "severity": alert.get("severity", "high"),
-                    "message": alert.get("message", score.get("escalation_reason", "")),
-                },
-            )
-        except httpx.HTTPError as exc:
-            print(f"  [EscalationLoop] notification failed (alert still raised): {exc}")
+            score = self._score(patient_ref, vitals)
+            self.scored += 1
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            self.errors += 1
+            return {"scored": False, "escalated": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        if not score.get("escalation_recommended"):
+            return {"scored": True, "escalated": False, "score": score}
+
+        self.escalated += 1
+        try:
+            alert = self._raise_alert(patient_ref, score)
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            self.errors += 1
+            return {
+                "scored": True,
+                "escalated": True,
+                "score": score,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        return {"scored": True, "escalated": True, "score": score, "alert": alert}

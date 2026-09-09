@@ -81,6 +81,31 @@ via a second raw connection, `verify_chain()` catches it at the tampered
 `services/common/tests/test_audit_postgres.py` (skips if no Postgres is
 reachable).
 
+### Real MQTT wiring: edge_agent -> EMQX -> ingest-gateway
+
+The other half of the Kafka story above, for the edge device's own transport
+rather than the replay simulators' HTTP one. `edge/edge_agent/mqtt_publisher.py`'s
+`MqttPublisher` had run against a real broker since Phase 4 (a deliberately-closed
+port proved its connect-fails path); `services/ingest-gateway/app.py`'s
+`handle_mqtt_message` was always real, tested code. Nothing had ever run a live
+subscription connecting the two -- this project's actual MQTT ingress path
+stopped at the broker.
+
+`services/ingest-gateway/mqtt_subscriber.py`'s `MqttSubscriberThread` closes
+that gap: a `paho-mqtt` client subscribing to `capstone/observations/#`
+(the same topic tree `MqttPublisher` publishes to), gated on `MQTT_HOST` the
+same way `KafkaConsumerThread` above is gated on `KAFKA_BOOTSTRAP_SERVERS` --
+idle in every test and any standalone run, started by `docker-compose.yml`'s
+`emqx` service alone. Verified via `docker compose up emqx`, then
+`edge_agent`'s real CLI (`python -m edge.edge_agent.agent run --mqtt-host
+localhost --mqtt-port 1883`) publishing 24 real observations over a real MQTT
+connection, and `GET /mqtt/stats` on a running `ingest-gateway` showing
+`messages_received: 24, errors: 0` -- the same real `Publisher` the REST path
+uses received all 24. Also covered by
+`services/ingest-gateway/tests/test_mqtt_subscriber.py`'s self-skipping
+end-to-end test (skips if no broker is reachable at `localhost:1883`), plus
+pure-logic tests of the connect/message callbacks that need no broker at all.
+
 ### Real HAPI FHIR validation
 
 `services/fhir-mapper/hapi_client.py`'s `POST /fhir/_publish` takes any
@@ -113,12 +138,6 @@ Keycloak is reachable at `localhost:8180`).
 
 ### Not independently re-verified in this pass (real, but not re-run here)
 
-- **EMQX**: the MQTT broker starts and its dashboard is reachable; the
-  `paho-mqtt` subscriber loop `ingest-gateway/app.py`'s own docstring says
-  isn't started in-process (`handle_mqtt_message` is real, tested code, but
-  nothing calls it from a live subscription) is unchanged from Phase 4 -- Phase
-  8 stood up the broker this needs, wiring the subscriber loop itself is still
-  open.
 - **rag-service / pgvector**: `retrieval.py` still runs real TF-IDF, not a
   live pgvector query -- the `postgres` service's `vector` extension is
   created (see `postgres/init.sql`) but nothing queries it yet. Tracked as

@@ -47,15 +47,13 @@ def pandas_reference_grid(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     row, pivot in pandas, then unify temperature / GCS / blood pressure.
     """
     itemids = ", ".join(str(i) for i in GRID_ITEMS)
-    events = conn.execute(
-        f"""
+    events = conn.execute(f"""
         SELECT ce.stay_id, ce.itemid, ce.valuenum,
                CAST(FLOOR(DATE_DIFF('second', ie.intime, ce.charttime) / 3600.0) AS BIGINT) AS hour
         FROM mimiciv_icu.chartevents ce
         JOIN mimiciv_icu.icustays ie ON ce.stay_id = ie.stay_id
         WHERE ce.itemid IN ({itemids})
-        """
-    ).fetchdf()
+        """).fetchdf()
 
     events = events[events.hour >= 0].copy()
     events["var"] = events.itemid.map(GRID_ITEMS)

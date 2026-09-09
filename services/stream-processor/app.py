@@ -45,11 +45,7 @@ def _build_escalation_loop() -> EscalationLoop | None:
     alert_url = os.environ.get("ALERT_SERVICE_URL")
     if not (risk_url and alert_url):
         return None
-    return EscalationLoop(
-        risk_engine_url=risk_url,
-        alert_service_url=alert_url,
-        notification_url=os.environ.get("NOTIFICATION_GATEWAY_URL"),
-    )
+    return EscalationLoop(risk_engine_url=risk_url, alert_service_url=alert_url)
 
 
 @asynccontextmanager

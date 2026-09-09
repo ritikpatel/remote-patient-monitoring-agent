@@ -34,15 +34,20 @@ python -m edge.edge_agent.agent run --transport file --in watch.jsonl \
 Verified: 60 batches -> **120 observations accepted, 0 failed** by a real
 running gateway.
 
-**Why `--sink http` and not MQTT.** MQTT is the production design and
-`mqtt_publisher.py` is real code, but **nothing in this repo subscribes MQTT and
-feeds ingest-gateway**. `services/ingest-gateway/app.py` has a real, tested
-`handle_mqtt_message`, and says in its own module docstring that the
-long-running `paho-mqtt` subscriber loop that would call it is not started. So
-the MQTT path stops at the broker today and cannot reach risk-engine or
-alert-service on its own. `--sink http` reuses the same `HTTPSink` the ICU and
-wearable replays use (finding F3), so all three producers reach the pipeline by
-one tested route.
+**Why `--sink http` above, when MQTT also reaches the pipeline now.** MQTT is
+the production design, and both halves are real: `mqtt_publisher.py` publishes,
+and `services/ingest-gateway/mqtt_subscriber.py` subscribes and calls the same
+real `handle_mqtt_message` the REST path uses (gated on `MQTT_HOST`, idle
+unless a broker is actually configured -- see `infra/compose/README.md`'s
+"Real MQTT wiring" section for the live-broker verification). `--sink http`
+stays this walkthrough's default because it needs no broker at all -- it
+reuses the same `HTTPSink` the ICU and wearable replays use (finding F3), so
+all three producers reach the pipeline by one tested route without standing up
+EMQX first. To exercise the real MQTT path instead: `docker compose -f
+infra/compose/docker-compose.yml up -d emqx`, start `ingest-gateway` with
+`MQTT_HOST=localhost MQTT_PORT=1883`, then `run --mqtt-host localhost
+--mqtt-port 1883` below in place of `--sink http` -- `GET
+/mqtt/stats` on the gateway shows what it received.
 
 **Verified through the full chain, not just the gateway.** With a real Kafka
 broker up and all five services running, the watch stream reaches scoring:
@@ -82,9 +87,13 @@ python -m edge.edge_agent.agent run --transport file --in demo_batches.jsonl \
 
 `make-demo` synthesizes a watch-shaped batch stream (1 Hz HR with slow drift + noise,
 accelerometer alternating resting/moving windows) in the exact `protocol.WatchBatch`
-JSON shape a real watch would send. Point `run --mqtt-host ...` at a real broker
-(local mosquitto today, EMQX once Phase 8 stands it up) to exercise the publish path;
-without one, everything lands in `--outbox` and the CLI says so.
+JSON shape a real watch would send. Point `run --mqtt-host ...` at a real broker --
+`infra/compose/docker-compose.yml`'s `emqx` service (`--mqtt-host localhost
+--mqtt-port 1883`, plain MQTT -- no cert material in that compose file), or any
+local mosquitto -- to exercise the publish path; without one, everything lands
+in `--outbox` and the CLI says so. `--mqtt-port` defaults to 8883, the mTLS
+port the `--ca-cert`/`--client-cert`/`--client-key` flags below are for; plain
+`localhost:1883` needs the port overridden as shown above.
 
 ## What's real vs. not
 

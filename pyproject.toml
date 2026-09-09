@@ -92,6 +92,18 @@ testpaths = ["ml", "warehouse", "simulators", "services", "edge", "notes_synth",
 # tests/test_app.py -- importlib mode identifies modules by file path rather than
 # dotted name, so neither the hyphen nor the duplicate basenames cause collisions.
 addopts = "--import-mode=importlib"
+# Several source modules (e.g. ml/features/engineer.py) import top-level packages
+# like `services.common.testing` without inserting the repo root onto sys.path
+# themselves -- they rely on whatever invoked pytest having already done that.
+# `python -m pytest` does this automatically (a Python interpreter behaviour, not
+# a pytest one); a bare `pytest`/`uv run pytest` invocation -- what CI actually
+# runs -- does not, and failed collection with "No module named 'services'" as a
+# result. This was invisible locally (every verification in this project's
+# history used `python -m pytest`) and in CI (the Lint job was broken first, so
+# Unit tests, which needs it, never got far enough to run) until both were fixed
+# in the same pass. `pythonpath` is pytest's own mechanism for this, independent
+# of --import-mode, and matches what `python -m pytest` was already doing.
+pythonpath = ["."]
 
 [tool.uv.sources]
 # PyPI's default Linux torch wheel is CUDA-enabled and drags in the entire

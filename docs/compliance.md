@@ -57,6 +57,25 @@ this project has or claims:
   not what PROJECT_PLAN.md's target backend -- claude-sonnet-5 -- would be in
   a real deployment, and that this substitution has real cost/behaviour
   consequences beyond compliance)
+- A BAA with an email or SMS provider for real paging. `services/common/
+  email.py` and `services/common/sms.py` can place a real SMTP send / a real
+  call to Twilio's API, both attempted independently by `notification-gateway`
+  on every high-severity alert notification -- each is a demo shortcut stated
+  as one in its own module docstring, guarded to fail closed (dry run unless
+  `EMAIL_MODE` / `SMS_MODE=live`, and every message forced to carry
+  `[SYNTHETIC DRILL]` so nothing that could read as a real clinical alert can
+  leave either module). Email is the channel this project actually
+  demonstrates live (an SMTP account, e.g. a Gmail app password, needs no
+  billing relationship the way a Twilio account does); SMS stays wired and
+  independently configurable, unprivileged relative to email in code -- which
+  one an operator has real credentials for is what decides which one fires.
+  `notification-gateway` is the *only* caller of either: it used to also be
+  triggered a second, independent time by `stream-processor`'s
+  `EscalationLoop`, which meant every real alert silently double-notified and
+  would have double-paged once paging was wired in -- fixed by making
+  alert-service the one place a new alert calls notification-gateway
+  (`services/alert-service/app.py`'s `_notify_dashboard`), and having
+  `EscalationLoop` read that result back rather than requesting a second one
 - Real ACME-issued TLS certificates from a publicly trusted CA (this project's
   are self-signed -- see above)
 - Retention and deletion policies, and a real access-request/right-to-erasure

@@ -35,8 +35,7 @@ def _synthetic_conn() -> duckdb.DuckDBPyConnection:
     # own transfer-out was a live discharge to the ward, not death.
     # hadm 2: a single stay, no death.
     # hadm 3: two ICU stays 45h apart -- inside the 72h readmission window.
-    conn.execute(
-        """
+    conn.execute("""
         create table mimiciv_derived.icustay_detail as select * from (values
             (1, 100, 101, 1, timestamp '2100-01-01 00:00:00', timestamp '2100-01-02 00:00:00', 1),
             (1, 100, 102, 2, timestamp '2100-01-10 00:00:00', timestamp '2100-01-12 00:00:00', 1),
@@ -45,35 +44,28 @@ def _synthetic_conn() -> duckdb.DuckDBPyConnection:
             (3, 300, 302, 2, timestamp '2100-03-04 00:00:00', timestamp '2100-03-06 00:00:00', 0)
         ) as t(subject_id, hadm_id, stay_id, icustay_seq, icu_intime, icu_outtime,
                hospital_expire_flag)
-        """
-    )
-    conn.execute(
-        """
+        """)
+    conn.execute("""
         create table mimiciv_hosp.admissions as select * from (values
             (100, timestamp '2100-01-11 12:00:00'),
             (200, cast(null as timestamp)),
             (300, cast(null as timestamp))
         ) as t(hadm_id, deathtime)
-        """
-    )
-    conn.execute(
-        """
+        """)
+    conn.execute("""
         create table mimiciv_derived.vasoactive_agent as select * from (values
             (201, timestamp '2100-02-01 05:00:00', timestamp '2100-02-01 08:00:00', 1.0),
             (201, timestamp '2100-02-01 08:00:00', timestamp '2100-02-01 12:00:00', 1.0)
         ) as t(stay_id, starttime, endtime, norepinephrine)
-        """
-    )
-    conn.execute(
-        """
+        """)
+    conn.execute("""
         create table mimiciv_derived.ventilation as select * from (values
             (301, timestamp '2100-03-01 10:00:00', timestamp '2100-03-01 20:00:00',
              'InvasiveVent'),
             (301, timestamp '2100-03-01 02:00:00', timestamp '2100-03-01 04:00:00',
              'SupplementalOxygen')
         ) as t(stay_id, starttime, endtime, ventilation_status)
-        """
-    )
+        """)
     return conn
 
 

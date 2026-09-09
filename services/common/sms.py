@@ -4,6 +4,17 @@ Paging a real phone is the one thing in this repo that reaches a human being
 directly, so the defaults are deliberately timid and every unsafe combination
 fails closed rather than silently sending.
 
+**Lives in `services/common/` because it has two callers, not one.**
+`notification-gateway`'s `/notify` handler calls `send()` for real -- SMS is
+now genuinely part of "the notification sent after an alert is deemed to be
+triggered" (a high-severity `/notify` call), the same way WebSocket broadcast
+and FCM push already are. `event-studio` calls only `compose()`, never
+`send()`, to show what the message *would* say the instant severity is
+composed, with zero network calls and no guard evaluation -- so a "Generate"
+click, which posts nothing anywhere, can never accidentally page a phone. The
+real send only happens downstream of a real alert-service escalation, via
+notification-gateway, exactly like every other alert this project raises.
+
 Configuration (all from the environment; nothing is committed):
 
     SMS_MODE=dry_run | live      default dry_run -- composes and returns, sends nothing
@@ -20,16 +31,15 @@ Four guards, each of which fails closed:
    named error instead of a partially-formed request.
 3. **The body must carry the synthetic-drill marker.** This module refuses to
    transmit a message that could be mistaken for a real clinical alert, which
-   is the failure that would actually matter to a person receiving it.
+   is the failure that would actually matter to a person receiving it. This
+   project has no live clinical deployment, so every SMS it is capable of
+   sending is a drill -- there is deliberately no code path that composes a
+   message without the marker.
 4. **The destination must be E.164.** A malformed number is a configuration
    error worth surfacing, not something to discover in a provider's logs.
 
 The auth token is never logged or returned. Errors carry the provider's status
 and a truncated body, which is enough to debug without leaking the credential.
-
-Architecturally this is a demo shortcut, and it is worth saying so: in the real
-system `notification-gateway` owns paging, and already routes by severity and
-time of day. This exists so a live drill can demonstrate the last hop.
 """
 
 from __future__ import annotations
@@ -68,9 +78,13 @@ class SmsResult:
         }
 
 
-def compose(patient_ref: str, news2: int, why: str) -> str:
+def compose(patient_ref: str, headline: str, detail: str) -> str:
+    """`headline` is the short escalation label -- event-studio passes
+    `"NEWS2 {n}"`, notification-gateway passes `"{severity.upper()} alert"` --
+    and `detail` is the reason. Kept generic rather than NEWS2-specific
+    because both real callers now share this one function."""
     return (
-        f"{DRILL_MARKER} {patient_ref}: NEWS2 {news2}, escalation - {why}. " "Not a real patient."
+        f"{DRILL_MARKER} {patient_ref}: {headline}, escalation - {detail}. " "Not a real patient."
     )
 
 

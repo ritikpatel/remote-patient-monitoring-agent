@@ -542,3 +542,86 @@ the textbook −0.50, so a 0.10-wide interval needs on the order of **725 positi
 subjects** against today's 49 — roughly 2.3× what assuming −0.50 would have
 claimed. See `ml/evaluation/reliability_report.md`, which is explicit that this
 is an extrapolation ~15× beyond its largest measured point.
+
+---
+
+## Note — scope after this review (2026-09-09)
+
+Four components were added to the repository after this review concluded and
+are **not covered by anything above**, F1-F6 included: `services/event-studio/`
+(an interactive event composer, now driving the pipeline *synchronously* — see
+below), the guarded SMS sender it originally carried (moved to
+`services/common/sms.py` once it gained a second real caller), and
+`ml/evaluation/channel_dropout.py` (prediction-time channel masking on the
+promoted model, which settled the "one model or two" question for the
+post-discharge arm — see `docs/two_arm_alignment.md` §A2 and
+`ml/evaluation/channel_dropout_report.md`). None were independently re-verified
+by a reviewer the way F1-F6 were; they are recorded here so this report's
+scope boundary stays explicit rather than silently going stale.
+
+**F7 — a real double-notification bug, found wiring the SMS sender in, fixed
+the same session.** `alert-service`'s `POST /alerts` already called
+`notification-gateway` internally on every genuinely new alert
+(`_notify_dashboard`). `stream-processor`'s `EscalationLoop` independently
+called it *again* after alert-service returned. Every real alert this project
+has ever raised through the streaming path was therefore already notifying
+the dashboard twice — cosmetically minor for a WebSocket toast, but exactly
+the kind of thing that turns serious the moment a *paging* channel is wired
+onto the same call, which is what adding SMS did. Fixed by making
+alert-service the one caller (it now returns the notification result, SMS
+included, embedded in its own response) and having `EscalationLoop` read that
+back instead of requesting a second one. `EscalationLoop` also gained
+`run_now()`, a one-shot synchronous entry point event-studio calls directly —
+the same score → alert code the async Kafka path runs, invoked without Kafka,
+so a composed event's real outcome (scored, escalated, alert raised or
+deduped, notification channels, the real SMS result, retrieved rag-service
+context) returns in one HTTP response instead of requiring a separate poll.
+Verified against six real running services, including that a same-bucket
+resubmit correctly produces zero further alert/notify/SMS calls.
+
+**Later the same day: email added as a second, independently-guarded paging
+channel** (`services/common/email.py`, mirroring `sms.py`'s four guards
+exactly), made the one this project demonstrates live because it needs only
+a free SMTP account rather than a funded Twilio one; SMS stayed wired and
+equally real, not demoted. Both are attempted, independently, on every
+high-severity notification.
+
+**F8 — the MQTT ingress gap, closed.** `edge_agent`'s `MqttPublisher` always
+worked against a real broker; `ingest-gateway`'s `handle_mqtt_message` was
+always real, tested code; nothing in between ever ran a live subscription
+connecting the two, a gap this report (and `docs/workflow.md`) had
+documented but not fixed. `mqtt_subscriber.py` is a `paho-mqtt` client
+gated on `MQTT_HOST`, mirroring `stream-processor`'s Kafka-consumer-thread
+gating on `KAFKA_BOOTSTRAP_SERVERS` exactly (idle in every test and any
+standalone run; started by `infra/compose/docker-compose.yml`'s `emqx`
+service alone). Verified end to end against a real EMQX broker, twice: once
+via pytest (`services/ingest-gateway/tests/test_mqtt_subscriber.py`, which
+self-skips without a reachable broker the same way the Kafka consumer's own
+end-to-end test does), and once by hand — `edge_agent`'s CLI publishing 24
+observations over real MQTT, `GET /mqtt/stats` showing `messages_received:
+24, errors: 0`, and the same real `Publisher` the REST path uses receiving
+all 24 (`RUNBOOK.md` step 6f-bis).
+
+**Also the same day: `event-studio` gained an optional, second, independent
+path into `agent-orchestrator`.** Composed vitals still never reach the
+agent graph (`_pipeline()`'s docstring: agent-orchestrator's nodes need a
+real warehouse `(stay_id, hour)` a browser-composed patient does not have —
+unchanged, and not a workaround). What changed: `GET /patients` (proxying
+risk-engine) lists the demo cohort's 140 real stays, and picking one makes
+"Send to pipeline" also call `agent-orchestrator POST /run` for that real
+stay — the same call `clinician-api` makes for a clinician opening a chart —
+reported in its own panel, never merged into the composed-vitals result.
+Verified live through an actual browser against seven real running services
+(the six F7 named, plus `agent-orchestrator` with a real Groq LLM
+configured): a low-severity composed event (no fast-path escalation)
+alongside a real, critical stay correctly produced two disagreeing verdicts
+in the same response — proof the two questions stay independent rather than
+one silently standing in for the other.
+
+For orientation, not as a re-review: this review opened with **274 passed / 12
+skipped with no infra; 284 passed / 2 skipped** with Kafka+Postgres+EMQX+
+HAPI+Keycloak up (the "What I verified" table above). Re-run today, the full
+suite stands at **402 passed / 16 skipped** with no infra and **415 passed /
+3 skipped** with that same infra up — net new tests for the components above
+and the work the appendices already describe, not a change to anything F1-F6
+verified.

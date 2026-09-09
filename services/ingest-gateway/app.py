@@ -13,22 +13,29 @@ check is ingest-gateway's own service-to-service auth on the REST path, a distin
 concern). A real deployment source this from a secret store, not a module constant --
 flagged in DEFAULT_API_KEY's docstring.
 
-MQTT ingress: `handle_mqtt_message` is real, tested code; the long-running
-`paho-mqtt` subscriber loop that would call it in production is not started in this
-process's tests (no EMQX broker in this environment -- Phase 8 infra), matching the
-transport pattern already established in edge/edge_agent/transport.py.
+MQTT ingress: `handle_mqtt_message` is real, tested code. `mqtt_subscriber.py` is
+the long-running `paho-mqtt` subscriber loop that calls it in production -- idle
+unless MQTT_HOST is set (this process's tests, and any standalone run without
+docker-compose, are unaffected), matching the transport pattern already
+established in edge/edge_agent/transport.py and mirroring exactly how
+stream-processor's app.py gates its Kafka consumer thread on
+KAFKA_BOOTSTRAP_SERVERS.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from mqtt_subscriber import MqttSubscriberConfig, MqttSubscriberThread  # noqa: E402
 from services.common.observability import instrument_metrics, instrument_tracing  # noqa: E402
 from services.common.publisher import (  # noqa: E402
     InMemoryPublisher,
@@ -61,7 +68,39 @@ def _default_publisher() -> Publisher:
     return InMemoryPublisher()
 
 
-app = FastAPI(title="ingest-gateway", version="0.1.0")
+_mqtt_subscriber: MqttSubscriberThread | None = None
+
+
+def _build_mqtt_subscriber() -> MqttSubscriberThread | None:
+    """MQTT_HOST unset (every test, and any standalone run without docker-compose)
+    keeps ingest-gateway exactly as it always was: handle_mqtt_message stays real
+    and directly testable, just uncalled by any live loop. docker-compose sets
+    MQTT_HOST=emqx alongside the broker it starts -- infra presence is the only
+    thing that turns this on, never a code change.
+    """
+    host = os.environ.get("MQTT_HOST")
+    if not host:
+        return None
+    config = MqttSubscriberConfig(
+        host=host,
+        port=int(os.environ.get("MQTT_PORT", MqttSubscriberConfig.port)),
+        topic_filter=os.environ.get("MQTT_TOPIC_FILTER", MqttSubscriberConfig.topic_filter),
+    )
+    return MqttSubscriberThread(config, on_observation=handle_mqtt_message)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    global _mqtt_subscriber
+    _mqtt_subscriber = _build_mqtt_subscriber()
+    if _mqtt_subscriber is not None:
+        _mqtt_subscriber.start()
+    yield
+    if _mqtt_subscriber is not None:
+        _mqtt_subscriber.stop()
+
+
+app = FastAPI(title="ingest-gateway", version="0.1.0", lifespan=_lifespan)
 instrument_metrics(app)
 instrument_tracing(app, "ingest-gateway")
 _publisher: Publisher = _default_publisher()
@@ -86,6 +125,24 @@ def check_api_key(x_api_key: str = Header(...)) -> None:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "ingest-gateway"}
+
+
+@app.get("/mqtt/stats")
+def mqtt_stats() -> dict:
+    """Observability for the subscriber loop -- without this, "is the edge device's
+    publish actually reaching ingest-gateway" was answerable only by grepping a
+    process log, exactly the blind spot escalation_stats() (stream-processor's
+    equivalent) was added to close for the F3 loop.
+    """
+    if _mqtt_subscriber is None:
+        return {"enabled": False, "reason": "MQTT_HOST is not set"}
+    return {
+        "enabled": True,
+        "connected": _mqtt_subscriber.connected,
+        "topic_filter": _mqtt_subscriber.config.topic_filter,
+        "messages_received": _mqtt_subscriber.messages_received,
+        "errors": _mqtt_subscriber.errors,
+    }
 
 
 @app.post("/observations", dependencies=[Depends(check_api_key)])
