@@ -65,7 +65,15 @@ jobs:
           for f in "${dockerfiles[@]}"; do
             svc=$(basename "$(dirname "$f")")
             echo "Building $svc"
-            docker build -t "capstone-rpm/$svc:ci" -f "$f" "$(dirname "$f")"
+            # Build context must be the repo root, not the service's own directory:
+            # every service Dockerfile COPYs repo-root-relative paths (services/common/,
+            # pyproject.toml, uv.lock, sometimes notes_synth/...) alongside its own
+            # services/<name>/ files -- exactly the pattern infra/k8s/README.md's own
+            # documented manual verification command uses. This loop predates the real
+            # Dockerfiles (Phase 0 scaffolding, before "no Dockerfiles yet" stopped being
+            # true in Phase 4) and was never updated for them; it could not have built a
+            # single one since.
+            docker build -t "capstone-rpm/$svc:ci" -f "$f" .
           done
 
   integration-smoke:
