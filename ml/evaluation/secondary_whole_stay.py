@@ -46,37 +46,29 @@ def build_stay_features(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     mean vitals over the first 24h -- everything a clinician would actually
     have on admission day, nothing from later in the stay.
     """
-    static = conn.execute(
-        """
+    static = conn.execute("""
         select d.stay_id, d.hadm_id, d.subject_id, d.admission_age, d.gender,
                d.hospital_expire_flag, i.first_careunit
         from mimiciv_derived.icustay_detail d
         join mimiciv_icu.icustays i using (stay_id)
-        """
-    ).fetchdf()
+        """).fetchdf()
 
-    severity = conn.execute(
-        f"""
+    severity = conn.execute(f"""
         select stay_id, max(news2) as max_news2_24h
         from capstone.news2 where hour < {FIRST_DAY_HOURS}
         group by stay_id
-        """
-    ).fetchdf()
-    sofa = conn.execute(
-        f"""
+        """).fetchdf()
+    sofa = conn.execute(f"""
         select stay_id, max(sofa_24hours) as max_sofa_24h
         from mimiciv_derived.sofa where hr < {FIRST_DAY_HOURS}
         group by stay_id
-        """
-    ).fetchdf()
-    vitals = conn.execute(
-        f"""
+        """).fetchdf()
+    vitals = conn.execute(f"""
         select stay_id, avg(hr) as mean_hr_24h, avg(rr) as mean_rr_24h,
                avg(spo2) as mean_spo2_24h
         from capstone.hourly_grid where hour < {FIRST_DAY_HOURS}
         group by stay_id
-        """
-    ).fetchdf()
+        """).fetchdf()
     ever_vaso = conn.execute(
         "select distinct stay_id from mimiciv_derived.vasoactive_agent"
     ).fetchdf()

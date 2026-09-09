@@ -7,7 +7,14 @@ repos:
         exclude: ^notebooks/
 
   - repo: https://github.com/psf/black
-    rev: 24.10.0
+    # Pinned to match uv.lock's resolved black exactly (pyproject.toml's own
+    # constraint is the open-ended "black>=24.4.0"). A stale rev here is not
+    # cosmetic: this hook and CI's `uv run black --check .` silently disagreed
+    # on stable style (24.10.0 vs 26.5.1 hug multi-line string arguments
+    # differently), so every commit that touched a file either tool had last
+    # formatted made the *other* one fail -- pre-commit re-reformatting files
+    # CI had just accepted, on repeat. Bump this whenever uv.lock's black moves.
+    rev: 26.5.1
     hooks:
       - id: black
         exclude: ^notebooks/

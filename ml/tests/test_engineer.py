@@ -36,29 +36,23 @@ def _synthetic_conn_for_static_features() -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect(":memory:")
     conn.execute("create schema mimiciv_derived")
     conn.execute("create schema mimiciv_icu")
-    conn.execute(
-        """
+    conn.execute("""
         create table mimiciv_derived.icustay_detail as select * from (values
             (1, 900, 65, 'M', timestamp '2100-01-01 00:00:00'),
             (2, 900, 65, 'M', timestamp '2100-02-01 00:00:00')
         ) as t(stay_id, subject_id, admission_age, gender, icu_intime)
-        """
-    )
-    conn.execute(
-        """
+        """)
+    conn.execute("""
         create table mimiciv_icu.icustays as select * from (values
             (1, 'Medical Intensive Care Unit'),
             (2, 'Medical Intensive Care Unit')
         ) as t(stay_id, first_careunit)
-        """
-    )
-    conn.execute(
-        """
+        """)
+    conn.execute("""
         create table mimiciv_derived.invasive_line as select * from (values
             (1, 'Arterial', timestamp '2100-01-01 02:00:00', timestamp '2100-01-01 08:00:00')
         ) as t(stay_id, line_type, starttime, endtime)
-        """
-    )
+        """)
     return conn
 
 

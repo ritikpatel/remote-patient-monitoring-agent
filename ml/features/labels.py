@@ -69,8 +69,7 @@ class EventTable:
 
 
 def death_events(conn: duckdb.DuckDBPyConnection) -> EventTable:
-    df = conn.execute(
-        """
+    df = conn.execute("""
         with flagged as (
             select d.hadm_id, d.stay_id, d.icustay_seq, a.deathtime,
                    row_number() over (
@@ -83,31 +82,26 @@ def death_events(conn: duckdb.DuckDBPyConnection) -> EventTable:
         select stay_id, deathtime as event_time
         from flagged
         where rn = 1
-        """
-    ).fetchdf()
+        """).fetchdf()
     return EventTable("death", df)
 
 
 def vasopressor_events(conn: duckdb.DuckDBPyConnection) -> EventTable:
-    df = conn.execute(
-        """
+    df = conn.execute("""
         select stay_id, min(starttime) as event_time
         from mimiciv_derived.vasoactive_agent
         group by stay_id
-        """
-    ).fetchdf()
+        """).fetchdf()
     return EventTable("vasopressor", df)
 
 
 def ventilation_events(conn: duckdb.DuckDBPyConnection) -> EventTable:
-    df = conn.execute(
-        """
+    df = conn.execute("""
         select stay_id, min(starttime) as event_time
         from mimiciv_derived.ventilation
         where ventilation_status = 'InvasiveVent'
         group by stay_id
-        """
-    ).fetchdf()
+        """).fetchdf()
     return EventTable("ventilation", df)
 
 

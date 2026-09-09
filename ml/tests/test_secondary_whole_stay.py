@@ -16,15 +16,13 @@ WAREHOUSE_DB = REPO_ROOT / "warehouse" / "mimic4_demo.db"
 
 def _synthetic_conn() -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect(":memory:")
-    conn.execute(
-        """
+    conn.execute("""
         create table admissions as select * from (values
             (1, 100, timestamp '2100-01-01', timestamp '2100-01-05', 0),
             (1, 101, timestamp '2100-01-20', timestamp '2100-01-25', 0),
             (2, 200, timestamp '2100-01-01', timestamp '2100-01-10', 1)
         ) as t(subject_id, hadm_id, admittime, dischtime, hospital_expire_flag)
-        """
-    )
+        """)
     conn.execute("create schema mimiciv_hosp")
     conn.execute("create table mimiciv_hosp.admissions as select * from admissions")
     return conn

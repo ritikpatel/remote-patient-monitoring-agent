@@ -105,16 +105,14 @@ def test_patient_and_encounter_from_real_admission(conn):
 
 
 def test_condition_from_real_diagnosis(conn):
-    row = conn.execute(
-        """
+    row = conn.execute("""
         SELECT d.hadm_id, a.subject_id, d.icd_code, d.icd_version, dd.long_title, d.seq_num
         FROM mimiciv_hosp.diagnoses_icd d
         JOIN mimiciv_hosp.d_icd_diagnoses dd
           ON d.icd_code = dd.icd_code AND d.icd_version = dd.icd_version
         JOIN mimiciv_hosp.admissions a ON d.hadm_id = a.hadm_id
         LIMIT 1
-        """
-    ).fetchone()
+        """).fetchone()
     hadm_id, subject_id, icd_code, icd_version, long_title, seq_num = row
     condition = condition_to_fhir(hadm_id, subject_id, icd_code, icd_version, long_title, seq_num)
     assert condition.code.coding[0].code == icd_code
@@ -132,8 +130,7 @@ def test_medication_administration_from_real_prescription(conn):
 
 
 def test_procedure_from_real_procedure(conn):
-    row = conn.execute(
-        """
+    row = conn.execute("""
         SELECT p.hadm_id, a.subject_id, p.icd_code, p.icd_version, dp.long_title,
                p.chartdate, p.seq_num
         FROM mimiciv_hosp.procedures_icd p
@@ -141,8 +138,7 @@ def test_procedure_from_real_procedure(conn):
           ON p.icd_code = dp.icd_code AND p.icd_version = dp.icd_version
         JOIN mimiciv_hosp.admissions a ON p.hadm_id = a.hadm_id
         LIMIT 1
-        """
-    ).fetchone()
+        """).fetchone()
     hadm_id, subject_id, icd_code, icd_version, long_title, chartdate, seq_num = row
     proc = procedure_to_fhir(
         hadm_id, subject_id, icd_code, icd_version, long_title, chartdate, seq_num
@@ -151,13 +147,11 @@ def test_procedure_from_real_procedure(conn):
 
 
 def test_risk_assessment_from_real_news2(conn):
-    row = conn.execute(
-        """
+    row = conn.execute("""
         SELECT n.stay_id, ie.subject_id, n.news2, n.tier_icu
         FROM capstone.news2 n JOIN mimiciv_icu.icustays ie ON n.stay_id = ie.stay_id
         WHERE n.news2 >= 7 LIMIT 1
-        """
-    ).fetchone()
+        """).fetchone()
     stay_id, subject_id, news2, tier_icu = row
     ra = risk_assessment_to_fhir(stay_id, subject_id, news2, None, tier_icu, ["HR contributes 2"])
     assert ra.prediction[0].qualitativeRisk.coding[0].code == tier_icu

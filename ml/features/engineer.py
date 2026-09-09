@@ -104,14 +104,12 @@ def add_severity_scores(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
 
 
 def add_arterial_line_feature(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    lines = conn.execute(
-        """
+    lines = conn.execute("""
         select il.stay_id, il.starttime, il.endtime, d.icu_intime
         from mimiciv_derived.invasive_line il
         join mimiciv_derived.icustay_detail d using (stay_id)
         where il.line_type = 'Arterial'
-        """
-    ).fetchdf()
+        """).fetchdf()
     out = grid.copy()
     out["has_arterial_line"] = 0
     if lines.empty:
@@ -133,14 +131,12 @@ def add_lab_order_intensity(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
     admission's own mean rate across its ICU stay so far -- "busier than
     usual for this patient," not "in the ICU."
     """
-    labs = conn.execute(
-        """
+    labs = conn.execute("""
         select l.hadm_id, l.charttime, d.stay_id, d.icu_intime
         from mimiciv_hosp.labevents l
         join mimiciv_derived.icustay_detail d using (hadm_id)
         where l.hadm_id is not null
-        """
-    ).fetchdf()
+        """).fetchdf()
     out = grid.copy()
     for w in ROLLING_WINDOWS_H:
         out[f"lab_orders_{w}h"] = 0
@@ -172,13 +168,11 @@ def add_static_features(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
     # subject_id is carried for grouping, not for modelling: it is the unit CV
     # must split on (ml/models/splits.py), and it is never added to the feature
     # column list below.
-    static = conn.execute(
-        """
+    static = conn.execute("""
         select d.stay_id, d.subject_id, d.admission_age, d.gender, i.first_careunit
         from mimiciv_derived.icustay_detail d
         join mimiciv_icu.icustays i using (stay_id)
-        """
-    ).fetchdf()
+        """).fetchdf()
     return grid.merge(static, on="stay_id", how="left")
 
 

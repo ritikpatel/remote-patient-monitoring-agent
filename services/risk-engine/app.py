@@ -295,16 +295,14 @@ def list_patients() -> list[PatientSummary]:
     """
     conn = get_conn()
     try:
-        rows = conn.execute(
-            """
+        rows = conn.execute("""
             SELECT n.stay_id, n.hour, n.news2, n.tier_icu, s.sofa_24hours
             FROM capstone.news2 n
             JOIN (SELECT stay_id, MAX(hour) AS hour FROM capstone.news2 GROUP BY stay_id) latest
               ON n.stay_id = latest.stay_id AND n.hour = latest.hour
             LEFT JOIN mimiciv_derived.sofa s ON s.stay_id = n.stay_id AND s.hr = n.hour
             ORDER BY n.news2 DESC
-            """
-        ).fetchall()
+            """).fetchall()
         return [
             PatientSummary(
                 stay_id=stay_id,
