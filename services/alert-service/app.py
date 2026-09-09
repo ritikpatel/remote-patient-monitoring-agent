@@ -67,23 +67,39 @@ def raise_alert(req: RaiseAlertRequest) -> dict:
     alert, was_new = get_store().raise_alert(
         req.patient_ref, req.alert_type, req.severity, req.message
     )
+    notification = None
     if was_new or alert.status == "escalated":
-        _notify_dashboard(alert)
-    return {"alert": vars(alert), "was_new": was_new}
+        notification = _notify_dashboard(alert)
+    return {"alert": vars(alert), "was_new": was_new, "notification": notification}
 
 
-def _notify_dashboard(alert: Alert) -> None:
-    """Best-effort push to notification-gateway's dashboard WebSocket
-    (PROJECT_PLAN.md section 12's dashboard needs a real live-update path,
-    not just polling) on a genuinely new alert or a fresh escalation --
-    never on a routine dedup repeat-count bump, which would otherwise
-    re-broadcast the same alert every time it recurs within its 4h bucket.
-    Deliberately swallows connection failures: a clinician still sees the
-    alert via GET /alerts/active on the next poll, so notification-gateway
-    being briefly unreachable must not fail alert *raising* itself.
+def _notify_dashboard(alert: Alert) -> dict | None:
+    """Push to notification-gateway on a genuinely new alert or a fresh
+    escalation -- never on a routine dedup repeat-count bump, which would
+    otherwise re-broadcast (and, since notification-gateway also pages a
+    high-severity alert by SMS, re-page) the same alert every time it recurs
+    within its 4h bucket (PROJECT_PLAN.md section 12's dashboard needs a real
+    live-update path, not just polling).
+
+    **This is the one place in the whole pipeline that calls
+    notification-gateway on a new alert.** It used to also happen a second
+    time, independently, in `stream-processor`'s `EscalationLoop` -- every
+    alert the streaming path raised was silently notifying twice. Harmless
+    for a WebSocket toast; not harmless once notification-gateway also sends
+    a real SMS on a high-severity notification, so this being the *only*
+    caller is now load-bearing, not just tidy (see `escalation.py`'s module
+    docstring for the fuller account).
+
+    Returns notification-gateway's parsed response (channels/pushed/sms) --
+    or an error dict, never raises -- so a caller of `POST /alerts` can see
+    what actually happened rather than just that a request was attempted.
+    Connection failures are reported, not swallowed: a clinician still sees
+    the alert via `GET /alerts/active` on the next poll either way, so
+    notification-gateway being briefly unreachable must not fail alert
+    *raising* itself, but it must not go silently unrecorded either.
     """
     try:
-        get_notify_client().post(
+        resp = get_notify_client().post(
             "/notify",
             json={
                 "patient_ref": alert.patient_ref,
@@ -91,8 +107,10 @@ def _notify_dashboard(alert: Alert) -> None:
                 "message": alert.message,
             },
         )
-    except httpx.HTTPError:
-        pass
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPError as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 @app.post("/alerts/{alert_id}/suppress")

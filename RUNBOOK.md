@@ -21,7 +21,7 @@ aliases it to 3.13, which has no dependencies installed. Always use `.venv/bin/p
 ```bash
 .venv/bin/python -m pytest -q
 ```
-Expect **312 passed, 14 skipped** with no infra running. The skips are infrastructure-gated
+Expect **368 passed, 15 skipped** with no infra running. The skips are infrastructure-gated
 and self-detecting — they name exactly what is missing. This is the single best opening demo: it runs with no Docker.
 
 ## 2. The warehouse (already built — verify, don't rebuild)
@@ -70,8 +70,12 @@ docker compose -f infra/compose/docker-compose.yml ps
 ```bash
 .venv/bin/python -m pytest -q
 ```
-Now **324 passed, 2 skipped**. This is a strong demo moment: the same suite, twelve more
+Now **380 passed, 3 skipped**. This is a strong demo moment: the same suite, twelve more
 tests passing, because real Kafka, Postgres, MQTT, HAPI and Keycloak are now reachable.
+The 3 remaining skips are no longer infra: one self-detects that no ECG dataset exists
+(retired on purpose — see PROJECT_PLAN.md's E9), one self-detects whichever half of the
+"is a promoted model exported" pair doesn't apply in this environment, and one wants the
+five services from step 5 already running locally for `eval/tests/test_latency.py`.
 
 ## 5. Start the services
 
@@ -84,8 +88,8 @@ SVC=risk-engine          PORT=8001 run
 SVC=alert-service        PORT=8005 run
 SVC=notification-gateway PORT=8006 run
 SVC=rag-service          PORT=8004 run
-SVC=agent-orchestrator   PORT=8007 run
-SVC=clinician-api        PORT=8008 run
+SVC=clinician-api        PORT=8007 run
+SVC=agent-orchestrator   PORT=8008 run
 
 # fhir-mapper needs HAPI or publishing returns a clear 503 rather than a fake pass.
 SVC=fhir-mapper PORT=8002 run HAPI_FHIR_BASE_URL=http://localhost:8090/fhir
@@ -93,14 +97,16 @@ SVC=fhir-mapper PORT=8002 run HAPI_FHIR_BASE_URL=http://localhost:8090/fhir
 # These two carry the live pipeline. Without PUBLISHER_BACKEND the gateway keeps
 # observations in memory; without RISK_ENGINE_URL/ALERT_SERVICE_URL stream-processor
 # windows them and stops there. Both default to off, so the replay demo in step 6f
-# silently does nothing if you skip these env vars.
+# silently does nothing if you skip these env vars. stream-processor does not need
+# NOTIFICATION_GATEWAY_URL -- alert-service is the one caller of notification-gateway
+# on a new alert now (it already defaults to http://localhost:8006, matching alert-
+# service's own startup above), not EscalationLoop; see escalation.py's docstring.
 SVC=ingest-gateway PORT=8000 run \
   PUBLISHER_BACKEND=kafka KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 SVC=stream-processor PORT=8003 run \
   KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
   RISK_ENGINE_URL=http://localhost:8001 \
-  ALERT_SERVICE_URL=http://localhost:8005 \
-  NOTIFICATION_GATEWAY_URL=http://localhost:8006
+  ALERT_SERVICE_URL=http://localhost:8005
 
 sleep 26
 curl -s http://localhost:8003/escalation/stats   # expect {"enabled": true, ...}
@@ -130,7 +136,7 @@ Returns probability, model name, the CV AUPRC it was validated at, and SHAP reas
 
 **c. The agent graph — the centrepiece**
 ```bash
-curl -s -X POST http://localhost:8007/run -H 'content-type: application/json' \
+curl -s -X POST http://localhost:8008/run -H 'content-type: application/json' \
   -d '{"patient_ref":"ICUStay/34617352","stay_id":34617352,"hour":35}' \
   | .venv/bin/python -m json.tool
 ```
@@ -199,7 +205,7 @@ skin temperature, not core.)
 
 **g. Audit chain**
 ```bash
-curl -s http://localhost:8007/audit/verify | .venv/bin/python -m json.tool
+curl -s http://localhost:8008/audit/verify | .venv/bin/python -m json.tool
 ```
 
 **h. The dashboard**
@@ -207,13 +213,40 @@ curl -s http://localhost:8007/audit/verify | .venv/bin/python -m json.tool
 cd ui && npm install && npm run dev     # http://localhost:5173
 ```
 
+**i. event-studio — compose an event and watch it clear the whole chain live**
+
+A second front door onto the same pipeline, for when there's no time to pick a
+real stay. Needs `risk-engine`, `alert-service`, `notification-gateway` and
+`rag-service` from step 5 up (not Kafka — this path calls them directly).
+```bash
+uvicorn app:app --app-dir services/event-studio --port 8009
+open http://localhost:8009
+```
+Drag severity toward the high end, **Generate** (preview only — nothing sent
+yet), then **Send to pipeline**. Watch the step list: risk-engine's real score
+and reason, alert-service raising a real alert (or deduping, R6, if you send
+the same patient again inside the same 4h bucket), notification-gateway's real
+channel routing and a dry-run SMS with the composed `[SYNTHETIC DRILL]` text,
+and rag-service's real retrieved passages. A mid-severity event escalates on
+the single red parameter (F1's limb), not the aggregate — the same asymmetry
+the wearable replay in **f** demonstrates.
+
+SMS is dry-run by default and is only ever attempted by `notification-gateway`
+after a genuine alert-service escalation — never from **Generate**, and never
+twice for one alert (see `services/stream-processor/escalation.py`'s module
+docstring for the double-notify bug that would otherwise have meant twice).
+See `services/event-studio/README.md` and `services/common/sms.py` for the
+four guards that gate turning on a real Twilio drill.
+
 ## 7. Reports and evaluation (pre-generated)
 
 ```bash
-open eval/output/report.html            # all four evaluation axes
+open eval/output/report.html                       # all four evaluation axes
 open reports/output/shift_handover_medical.pdf
 open ml/evaluation/report.md
-open notebooks/01_capstone_eda.ipynb    # the EDA everything traces back to
+open ml/evaluation/channel_dropout_report.md        # what the model does when a sensor goes missing
+open ml/evaluation/wrist_only_report.md             # the post-discharge arm's model
+open notebooks/01_capstone_eda.ipynb                # the EDA everything traces back to
 ```
 
 ## 8. Load test
@@ -237,7 +270,7 @@ docker compose -f infra/compose/docker-compose.yml down
    while risk does not. That gap is the reason the platform exists.
 2. **The data said hourly, so the system is honest about hourly.** Real-time is produced by
    replay and by the watch, and every artefact says so.
-3. **NEWS2 works today** — 110 of 140 stays trip it — so alerting never depended on the ML
+3. **NEWS2 works today** — 128 of 140 stays trip it — so alerting never depended on the ML
    succeeding. The model had to beat NEWS2 to earn its place, and does, 20/20 CV repeats.
 4. **The agent never does arithmetic.** Policy decides escalation; the LLM explains and advises,
    and every step is hash-chain audited.

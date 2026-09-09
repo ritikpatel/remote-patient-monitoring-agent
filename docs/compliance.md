@@ -57,6 +57,19 @@ this project has or claims:
   not what PROJECT_PLAN.md's target backend -- claude-sonnet-5 -- would be in
   a real deployment, and that this substitution has real cost/behaviour
   consequences beyond compliance)
+- A BAA with an SMS carrier for real paging. `services/common/sms.py` can
+  place a real call to Twilio's API, attempted by `notification-gateway` on
+  every high-severity alert notification -- it is a demo shortcut stated as
+  one in its own module docstring, guarded to fail closed (dry run unless
+  `SMS_MODE=live`, and every message body forced to carry
+  `[SYNTHETIC DRILL]` so nothing that could read as a real clinical alert can
+  leave this module). `notification-gateway` is the *only* caller: it used
+  to also be triggered a second, independent time by `stream-processor`'s
+  `EscalationLoop`, which meant every real alert silently double-notified
+  and would have double-paged a phone once SMS was wired in -- fixed by
+  making alert-service the one place a new alert calls notification-gateway
+  (`services/alert-service/app.py`'s `_notify_dashboard`), and having
+  `EscalationLoop` read that result back rather than requesting a second one
 - Real ACME-issued TLS certificates from a publicly trusted CA (this project's
   are self-signed -- see above)
 - Retention and deletion policies, and a real access-request/right-to-erasure

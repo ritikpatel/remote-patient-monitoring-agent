@@ -47,6 +47,12 @@ def test_raise_and_fetch_active():
     )
     assert resp.status_code == 200
     assert resp.json()["was_new"] is True
+    # The one place a new alert triggers notification-gateway -- embedded here,
+    # not requested a second time by whoever called POST /alerts. Membership,
+    # not equality: _notify_dashboard sends no explicit timestamp, so
+    # route_notification's overnight-only oncall_escalation channel may or may
+    # not also be present depending on the real wall-clock time the suite runs.
+    assert {"dashboard", "push"}.issubset(resp.json()["notification"]["channels"])
 
     resp2 = client.get("/alerts", params={"patient_ref": "ICUStay/1"})
     assert resp2.status_code == 200
@@ -138,6 +144,56 @@ def test_a_routine_dedup_repeat_does_not_rebroadcast():
         )
         received = ws.receive_json()
     assert received["patient_ref"] == "ICUStay/22"  # not the ICUStay/21 repeat
+
+
+def test_a_new_high_severity_alert_attempts_sms_dry_run_by_default(monkeypatch):
+    """SMS is dry-run unless an operator explicitly opts in (SMS_MODE=live) --
+    safe to leave wired through this path in every environment."""
+    monkeypatch.delenv("SMS_MODE", raising=False)
+    resp = client.post(
+        "/alerts",
+        json={
+            "patient_ref": "ICUStay/30",
+            "alert_type": "news2_high",
+            "severity": "high",
+            "message": "NEWS2=9: single red parameter",
+        },
+    )
+    sms = resp.json()["notification"]["sms"]
+    assert sms["mode"] == "dry_run"
+    assert sms["sent"] is False
+    assert "ICUStay/30" in sms["text"]
+
+
+def test_a_new_low_severity_alert_does_not_attempt_sms():
+    resp = client.post(
+        "/alerts",
+        json={"patient_ref": "ICUStay/31", "alert_type": "t", "severity": "low", "message": "m"},
+    )
+    assert resp.json()["notification"]["sms"] is None
+
+
+def test_a_dedup_repeat_does_not_attempt_a_second_sms():
+    """was_new: False must not re-trigger _notify_dashboard at all -- this is
+    the same guarantee test_a_routine_dedup_repeat_does_not_rebroadcast proves
+    for the WebSocket, extended to the channel that reaches a phone."""
+    first = client.post(
+        "/alerts",
+        json={"patient_ref": "ICUStay/32", "alert_type": "t", "severity": "high", "message": "1st"},
+    )
+    assert first.json()["notification"]["sms"] is not None
+
+    second = client.post(
+        "/alerts",
+        json={
+            "patient_ref": "ICUStay/32",
+            "alert_type": "t",
+            "severity": "high",
+            "message": "2nd, same bucket",
+        },
+    )
+    assert second.json()["was_new"] is False
+    assert second.json()["notification"] is None
 
 
 def test_alerts_active_spans_every_patient():

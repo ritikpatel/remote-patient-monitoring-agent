@@ -6,12 +6,23 @@ model trains on), shows the NEWS2 the pipeline will compute *before* sending,
 and posts it through the same `HTTPSink` contract the replay simulators use, so
 this adds a front door rather than a second ingestion path.
 
-SMS is deliberately DRY-RUN by default (`SMS_MODE=dry_run`). Alerting a real
-phone needs a provider account, credentials in env vars, and a real clinician
-who agreed to be paged -- none of which belong in a demo's default path. Set
-SMS_MODE=live plus the provider vars to actually send.
+**Sending an event now drives the real pipeline synchronously, not just the
+async Kafka path.** Posting to `ingest-gateway` still happens, for the same
+audit trail and Kafka-consumer path every other producer gets, but the HTTP
+response you get back does not wait on that async path -- instead this calls
+risk-engine, alert-service (which itself calls notification-gateway, which
+sends SMS) and rag-service directly, in the same order the streaming path
+uses, and returns what actually happened. See `_pipeline()` below and
+`services/stream-processor/escalation.py`'s `EscalationLoop.run_now`, which
+this reuses rather than reimplementing.
 
-    uvicorn app:app --app-dir services/event-studio --port 8007
+SMS is never sent from a "Generate" click, only ever as a real consequence of
+a real alert-service escalation reached via "Send to pipeline" -- see
+`services/common/sms.py`'s module docstring for why that module has exactly
+one real sender left (notification-gateway) and this service only composes a
+preview.
+
+    uvicorn app:app --app-dir services/event-studio --port 8009
 """
 
 from __future__ import annotations
@@ -29,10 +40,16 @@ from pydantic import BaseModel, Field
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# stream-processor is a hyphenated directory (cannot be a dotted import path,
+# same reason services/common/testing.py exists) -- this mirrors exactly how
+# stream-processor's own app.py reaches its sibling modules: put the
+# directory on sys.path, then a plain top-level import.
+sys.path.insert(0, str(REPO_ROOT / "services" / "stream-processor"))
 
 import duckdb  # noqa: E402
-import sms  # noqa: E402
+from escalation import EscalationLoop  # noqa: E402
 from generator import generate  # noqa: E402
+from services.common import sms  # noqa: E402
 from services.contracts.observation import Observation, ObservationSource, QualityFlag  # noqa: E402
 from simulators.sinks import DEFAULT_INGEST_API_KEY  # noqa: E402
 from warehouse.news2 import load_thresholds, should_escalate, tier_for_score  # noqa: E402
@@ -43,10 +60,40 @@ GATEWAY_URL = os.environ.get("INGEST_GATEWAY_URL", "http://localhost:8000")
 # Same constant the replay simulators authenticate with -- a private default
 # here just produces a confusing 401 against a correctly-running gateway.
 API_KEY = os.environ.get("INGEST_API_KEY", DEFAULT_INGEST_API_KEY)
-SMS_MODE = os.environ.get("SMS_MODE", "dry_run")
+# The same three real services EscalationLoop calls, plus rag-service for the
+# context passages the agent's ContextRetriever would otherwise supply -- see
+# _pipeline()'s docstring for why the full agent graph is not called instead.
+RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8001")
+ALERT_SERVICE_URL = os.environ.get("ALERT_SERVICE_URL", "http://localhost:8005")
+RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8004")
 
 app = FastAPI(title="event-studio")
 STATIC = Path(__file__).resolve().parent / "static"
+
+# Injectable for tests, same idiom as alert-service's set_store/set_notify_client
+# and EscalationLoop's own `client` field: None means "real network client
+# against RISK_ENGINE_URL/ALERT_SERVICE_URL/RAG_SERVICE_URL/GATEWAY_URL", which
+# is what every real deployment gets. A test wires an httpx.MockTransport (or a
+# TestClient mounted on another service's real ASGI app) through these instead
+# of needing live infra or real ports.
+_pipeline_client: httpx.Client | None = None
+_rag_client: httpx.Client | None = None
+_gateway_client: httpx.Client | None = None
+
+
+def set_pipeline_client(client: httpx.Client | None) -> None:
+    global _pipeline_client
+    _pipeline_client = client
+
+
+def set_rag_client(client: httpx.Client | None) -> None:
+    global _rag_client
+    _rag_client = client
+
+
+def set_gateway_client(client: httpx.Client | None) -> None:
+    global _gateway_client
+    _gateway_client = client
 
 
 _thresholds = None
@@ -57,7 +104,7 @@ def thresholds():
 
     `warehouse/news2.py` derives them per-build from the cohort's own
     percentiles, so a copy here would be a second source of truth that silently
-    goes stale the first time the warehouse is rebuilt on different data.
+    goes stale the first time the warehouse is rebuilt.
     """
     global _thresholds
     if _thresholds is None:
@@ -82,7 +129,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "service": "event-studio",
-        "sms_mode": SMS_MODE,
+        "sms_mode": os.environ.get("SMS_MODE", "dry_run"),
         "icu_medium": th.icu_medium,
         "icu_high": th.icu_high,
     }
@@ -111,6 +158,55 @@ def _observations(ev, patient_ref: str) -> list[Observation]:
     ]
 
 
+def _pipeline(patient_ref: str, vitals: dict, why: str) -> dict:
+    """Drive the real pipeline synchronously and report what actually
+    happened -- not the local preview's guess.
+
+    Calls, in order: risk-engine (`EscalationLoop.run_now`, exactly the
+    deterministic streaming path's own scoring + alert-raising code, reused
+    rather than re-implemented), then alert-service (inside `run_now`), which
+    itself calls notification-gateway (dashboard + push + a guarded SMS on
+    high severity) and embeds that result -- and, only if the pipeline
+    actually escalated, rag-service directly for context passages.
+
+    **Why rag-service directly and not the full agent-orchestrator graph.**
+    `agent-orchestrator`'s `VitalsMonitor`/`LabInterpreter`/`RiskScorer` nodes
+    read `capstone.hourly_grid` and `labevents` by a real `(stay_id, hour)` --
+    a browser-composed patient has neither. Inventing a fake `stay_id` would
+    make those nodes silently return empty rows rather than an honest error,
+    and `RiskScorer` would then relay risk-engine's *warehouse-backed* `/score`
+    for a `stay_id` that does not exist -- a wrong, misleading result on
+    exactly the demo path that most needs to be trustworthy. Calling
+    rag-service's `/search` directly is the same retrieval call
+    `ContextRetriever` makes, on the one thing this event actually has: an
+    escalation reason to search on.
+    """
+    loop = EscalationLoop(
+        risk_engine_url=RISK_ENGINE_URL,
+        alert_service_url=ALERT_SERVICE_URL,
+        client=_pipeline_client,
+    )
+    try:
+        result = loop.run_now(patient_ref, vitals)
+    finally:
+        loop.close()
+
+    if result.get("escalated"):
+        owns_rag = _rag_client is None
+        rag_client = _rag_client or httpx.Client(base_url=RAG_SERVICE_URL, timeout=10)
+        try:
+            r = rag_client.get("/search", params={"q": why, "k": 3})
+            r.raise_for_status()
+            result["context_passages"] = r.json()
+        except httpx.HTTPError as exc:
+            result["context_error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if owns_rag:
+                rag_client.close()
+
+    return result
+
+
 @app.post("/event")
 def make_event(req: EventRequest) -> dict:
     ev = generate(req.severity, seed=req.seed)
@@ -121,6 +217,16 @@ def make_event(req: EventRequest) -> dict:
     # trajectory, so gcs_drop is False here by construction.
     max_nongcs = max(v for k, v in ev.subscores.items() if k != "gcs_total")
     escalates = should_escalate(tier, max_nongcs, False)
+    why = (
+        f"aggregate tier '{tier}'"
+        if tier == "high"
+        else (
+            f"single red parameter (subscore 3) in "
+            f"{[k for k, v in ev.subscores.items() if v >= 3 and k != 'gcs_total']}"
+            if max_nongcs >= 3
+            else "no limb triggered"
+        )
+    )
 
     result = {
         "severity": req.severity,
@@ -130,48 +236,41 @@ def make_event(req: EventRequest) -> dict:
         "tier_icu": tier,
         "max_component_nongcs": max_nongcs,
         "would_escalate": bool(escalates),
-        "why": (
-            f"aggregate tier '{tier}'"
-            if tier == "high"
-            else (
-                f"single red parameter (subscore 3) in "
-                f"{[k for k, v in ev.subscores.items() if v >= 3 and k != 'gcs_total']}"
-                if max_nongcs >= 3
-                else "no limb triggered"
-            )
-        ),
+        "why": why,
         "sent": False,
-        "sms": None,
+        # Text only, zero network calls, no guard evaluated -- sms.compose()
+        # cannot send anything. What the real pipeline would say once escalated
+        # is `pipeline.alert.notification.sms` below, populated only when this
+        # event is actually sent and actually escalates for real.
+        "sms_preview": (
+            sms.compose(req.patient_ref, f"NEWS2 {ev.news2}", why) if escalates else None
+        ),
+        "pipeline": None,
     }
-    # The SMS block is a PREVIEW of what an escalation would page, computed from
-    # the shared `should_escalate` predicate rather than a second copy of the
-    # rule. Real paging is notification-gateway's job downstream; this studio
-    # only shows what the pipeline would do, so it is populated on generate as
-    # well as on send and never actually dials out (see send_sms).
-    if escalates:
-        result["sms"] = send_sms(req.patient_ref, ev.news2, result["why"])
 
     if not req.send:
         return result
 
     obs = _observations(ev, req.patient_ref)
+    owns_gateway = _gateway_client is None
+    gateway_client = _gateway_client or httpx.Client(
+        base_url=GATEWAY_URL, headers={"X-API-Key": API_KEY}, timeout=10
+    )
     try:
-        with httpx.Client(base_url=GATEWAY_URL, headers={"X-API-Key": API_KEY}, timeout=10) as c:
-            r = c.post("/observations/batch", json=[o.model_dump(mode="json") for o in obs])
+        r = gateway_client.post(
+            "/observations/batch", json=[o.model_dump(mode="json") for o in obs]
+        )
         result["sent"] = r.status_code in (200, 201, 202)
         result["gateway_status"] = r.status_code
     except httpx.HTTPError as exc:
         result["gateway_error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if owns_gateway:
+            gateway_client.close()
+
+    # Realtime: score, alert and notify right now, synchronously, against the
+    # same real services -- independent of whether the async Kafka path above
+    # succeeded, since the vitals are already in hand either way.
+    result["pipeline"] = _pipeline(req.patient_ref, {**ev.values, **ev.extras}, why)
 
     return result
-
-
-def send_sms(patient_ref: str, news2: int, why: str) -> dict:
-    """Compose the escalation SMS and hand it to the guarded sender.
-
-    Dry run unless `SMS_MODE=live` and a provider is fully configured; see
-    `sms.py` for the four guards, each of which fails closed. Nothing about the
-    demo path changes when it is off -- the composed text is still returned and
-    shown in the UI, so what *would* be sent is always visible.
-    """
-    return sms.send(sms.compose(patient_ref, news2, why)).as_dict()

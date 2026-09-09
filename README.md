@@ -1,6 +1,10 @@
 # Agentic AI Platform for Remote Patient Monitoring in ICU and Post-Discharge Care
 
 **Capstone build — ISB AMPBA.** Full build plan: [PROJECT_PLAN.md](PROJECT_PLAN.md).
+One composite event's journey to an alert, in order:
+[`docs/workflow_simple.md`](docs/workflow_simple.md). Full end-to-end
+architecture, every component labelled real/stubbed:
+[`docs/workflow.md`](docs/workflow.md).
 
 > This platform is validated on a 100-patient demo subset of MIMIC-IV. Clinical
 > narrative is LLM-generated from structured data. Wearable deterioration
@@ -15,11 +19,17 @@
 > evaluation. The post-discharge arm has **no outcome labels at all** — the
 > wearable cohort is healthy volunteers with no ICU link (E10), so nothing in
 > this project links wearable telemetry to a post-discharge outcome. What the
-> post-discharge arm now has is a model trained on ICU labels but restricted to
-> *wearable-obtainable channels*
-> ([`ml/evaluation/wrist_only_report.md`](ml/evaluation/wrist_only_report.md)),
-> which is an honest proxy and explicitly not a readmission model. The gap, what
-> is fixable in code and what is a permanent data limit, is planned out in
+> post-discharge arm now has is a **measured degradation, not a second model**.
+> [`ml/evaluation/wrist_only_report.md`](ml/evaluation/wrist_only_report.md)
+> trained one on ICU labels restricted to *wearable-obtainable channels*
+> (AUPRC 0.269 on 15 features vs the full model's 0.493 on 67); then
+> [`ml/evaluation/channel_dropout_report.md`](ml/evaluation/channel_dropout_report.md)
+> showed that just *masking* the promoted ICU model down to those same channels
+> at prediction time scores 0.274 — statistically the same number. One model
+> that degrades gracefully covers the ground a second, wrist-specific model
+> would have, so that is what is promoted. Both studies are honest proxies and
+> explicitly not a readmission model. The gap, what is fixable in code and what
+> is a permanent data limit, is planned out in
 > [`docs/two_arm_alignment.md`](docs/two_arm_alignment.md).
 
 ## The finding that motivates this
@@ -71,7 +81,7 @@ building it, and how it was verified.
 | 2 | Agentic AI Clinical Monitoring Engine | P4 | Agent graph produces a scored, cited escalation decision with a full audit trail | ✅ |
 | 3 | Early Warning & Alert System | P1, P4 | Recalibrated NEWS2 fires with measured lead time to event | ✅ all three NEWS2 limbs; 41.0% event coverage, 0.63h median lead (F1 fixed) |
 | 4 | Predictive Risk Modeling Module | P5 | Beats NEWS2 on AUPRC in ≥15 of 20 CV repeats | ✅ 20/20 under patient-level CV (F6 fixed a stay-level grouping leak); subgroup fairness audit; `gender` kept on ablation (F4 reversed) |
-| 4b | …the same module, for the post-discharge arm | P5 | A model that runs on wearable-obtainable channels only | ✅ wrist-only model, AUPRC 0.269 vs the ICU model's 0.493 on 15 features instead of 67 ([report](ml/evaluation/wrist_only_report.md)) |
+| 4b | …the same module, for the post-discharge arm | P5 | A model that runs on wearable-obtainable channels only | ✅ wrist-only model, AUPRC 0.269 vs the ICU model's 0.493 on 15 features instead of 67 ([report](ml/evaluation/wrist_only_report.md)) — then shown redundant: masking the full model to those channels scores the same 0.274 ([report](ml/evaluation/channel_dropout_report.md)), so one degrading model ships, not two |
 | 5 | FHIR-Based Integration Layer | P4 | HAPI FHIR validates every emitted resource | ✅ all 7 mapped resource types, references resolved, against a live HAPI server (F2 fixed) |
 | 6 | RAG-Powered Clinical Summarization | P3, P4 | Every claim traces to a fact-ledger entry | ✅ |
 | 7 | Smart Hospital Connectivity Layer | P6 | Remote clinician sees live vitals and acknowledges an alert off-site | ✅ |
@@ -79,6 +89,28 @@ building it, and how it was verified.
 | 9 | Scalable Microservices Architecture | P4, P8 | HPA scales under k6 load; pods survive chaos kill | ✅ both observed live on a real `kind` cluster |
 | 10 | Evaluation & Validation Framework | P7 | Single report covering all four axes | ✅ |
 | 11 | Security & Compliance Layer | P8 | Audit chain verifies; NetworkPolicy denies by default | ✅ both observed live |
+
+## Beyond the plan's 9 phases
+
+Three more real components were added after all 9 phases and 11 deliverables
+above were independently verified complete (see `VALIDATION_REPORT.md`).
+PROJECT_PLAN.md doesn't call for any of them — each earned its place by
+measurement, or by closing a gap the phases above had already stated honestly
+rather than hidden.
+
+| Component | What it is | Evidence |
+|---|---|---|
+| [`services/event-studio/`](services/event-studio/README.md) | Compose a synthetic patient event in a browser and drive the real pipeline **synchronously** — risk-engine, alert-service, notification-gateway (SMS included) and rag-service, in that order, in one request/response | Verified against six real running services: severity 0.95 → real alert raised, real notification with real channel routing, dry-run SMS text, 3 real rag-service passages; a same-bucket resubmit correctly deduped with zero further alert/notify/SMS |
+| [`services/common/sms.py`](services/event-studio/README.md#escalation-and-sms-stated-plainly) | The guarded Twilio SMS sender, now sent for real by `notification-gateway` on every high-severity alert notification (not by event-studio, which only ever composes a text preview) | 16 tests asserting a *refusal* except the mocked live-transport path; **a real, pre-existing double-notification bug found while wiring this in** — `alert-service` and `stream-processor`'s `EscalationLoop` each independently called `notification-gateway` on a new alert, so every real alert was already notifying twice before this change made "twice" mean two SMS pages. Fixed by making alert-service the one caller |
+| [`ml/evaluation/channel_dropout.py`](ml/evaluation/channel_dropout_report.md) | Masks channels on the *promoted* ICU model at prediction time, instead of training a second model for the post-discharge arm | Settled the "one model or two" question the two-arm gap raised — see the callout above |
+
+[`ml/evaluation/export_training_data.py`](ml/evaluation/report.md) shipped
+alongside these: a reproducible export of the exact holdout split
+`eval/prediction.py` uses, verified column-for-column against the promoted
+model's manifest, so the training data behind any number in this repo can be
+regenerated rather than hand-copied. Its output is gitignored — exported rows
+are patient-derived, and `docs/DATA_USE.md`'s rule is that data never enters
+git.
 
 ## Repository layout
 
@@ -89,13 +121,13 @@ warehouse/                      DuckDB build + mimic-code concepts + hourly grid
 simulators/                     real_event_replay, wearable_replay, morphing, arrival_models
 notes_synth/                    LLM note generation + fact ledger
 ml/{features,models,evaluation}/  labels, feature engineering, models, Phase 5 report
-services/                       9 FastAPI microservices + shared common/contracts
+services/                       9 FastAPI microservices + shared common/contracts, plus event-studio (a local-only demo front end, not one of the 9)
 edge/{wear_os,edge_agent}/      real Wear OS app + BLE-to-MQTT bridge
 ui/                              clinician dashboard (React)
 reports/                         automated PDF clinical reports
 infra/{compose,k8s,helm,observability,ci}/  docker-compose, kind/K8s manifests, Helm charts, Prometheus/Grafana
 eval/                            validation framework + k6 load tests
-docs/                            compliance mapping, data-use terms
+docs/                            compliance mapping, data-use terms, workflow diagrams (full + simple)
 ```
 
 ## Quick start
@@ -117,7 +149,7 @@ docker compose -f infra/compose/docker-compose.yml up -d <services you need>
 # see infra/compose/README.md — an 8GB machine can't run everything at once
 
 # 5. Everything
-pytest -q   # 312 passed, 14 skipped without infra; 324 passed, 2 skipped with it up
+pytest -q   # 368 passed, 15 skipped without infra; 380 passed, 3 skipped with it up
 ```
 
 ## What's real vs. what's honestly scoped

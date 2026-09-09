@@ -44,6 +44,14 @@
  pre{background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:12px;
      font-size:12px;overflow-x:auto;margin:0;font-family:var(--mono)}
  .muted{color:var(--muted);font-size:13px}
+ .steps{display:flex;flex-direction:column;gap:6px}
+ .step{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:4px;
+       border:1px solid var(--line);font-size:13px}
+ .step .dot{width:9px;height:9px;border-radius:50%;flex:none}
+ .step.ok .dot{background:var(--ok)} .step.skip .dot{background:var(--line)}
+ .step.err .dot{background:var(--crit)} .step.pending .dot{background:var(--warn)}
+ .step b{font-family:var(--mono);min-width:120px}
+ .step span{color:var(--muted)}
 </style>
 </head>
 <body>
@@ -54,7 +62,9 @@
     trained on &mdash; and push it through the real pipeline.</p>
   </div>
   <div class="warnbar"><strong>Synthetic drill.</strong> Every value here is generated, watermarked
-  <code>synthetic</code> on the wire, and describes no real patient. SMS defaults to dry-run.</div>
+  <code>synthetic</code> on the wire, and describes no real patient. "Generate" never sends anything
+  anywhere. SMS defaults to dry-run and is only ever sent by notification-gateway, and only after
+  "Send to pipeline" causes a real alert-service escalation &mdash; never from this preview.</div>
 
   <div class="panel">
     <div class="row">
@@ -79,12 +89,22 @@
       <div style="flex:1"><div class="k muted">Escalation</div><div id="why">&mdash;</div></div>
     </div>
     <div class="grid" id="vals"></div>
-    <div id="smsbox" hidden><div class="k muted" style="margin-bottom:5px">SMS to clinician</div>
+    <div id="smsbox" hidden><div class="k muted" style="margin-bottom:5px">SMS preview &mdash; text only, nothing sent yet</div>
       <pre id="sms"></pre></div>
+    <div id="pipebox" hidden>
+      <div class="k muted" style="margin-bottom:8px">Real pipeline result &mdash; risk-engine &rarr; alert-service &rarr; notification-gateway (SMS included)</div>
+      <div class="steps" id="steps"></div>
+    </div>
   </div>
 </div>
 <script>
 const $=id=>document.getElementById(id);
+// Real service responses can legitimately contain "<"/">" -- sms.py's own
+// unset-phone placeholder is literally "<CLINICIAN_PHONE unset>" -- and this
+// is inserted via innerHTML for the step dots' markup, so it must be escaped
+// or the browser parses it as a tag and silently drops it. Found by actually
+// running this against real services, not by inspection.
+const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const UNITS={hr:"bpm",rr:"/min",spo2:"%",sbp:"mmHg",map:"mmHg",temp_c:"°C",gcs_total:"",fio2:"%",glucose:"mg/dL"};
 let last=null;
 const sevVal=()=>(+$("sev").value/100);
@@ -102,6 +122,40 @@ async function go(send){
     body:JSON.stringify({severity:sevVal(),patient_ref:$("pt").value,send:send})});
   const d=await r.json();last=d;render(d,send);
 }
+function pipelineSteps(p){
+  const out=[];
+  if(!p)return out;
+  if(!p.scored){out.push({s:"err",l:"risk-engine",d:p.error||"scoring failed"});return out;}
+  out.push({s:"ok",l:"risk-engine",d:
+    `NEWS2 ${p.score.news2} — ${p.score.escalation_recommended?"escalation recommended":"no escalation"}`
+    +(p.score.escalation_reason?` (${p.score.escalation_reason})`:"")});
+  if(!p.escalated){
+    out.push({s:"skip",l:"alert-service",d:"not called — did not escalate"});
+    out.push({s:"skip",l:"notification",d:"not called"});
+    return out;
+  }
+  const a=p.alert||{};
+  if(p.error||!p.alert){out.push({s:"err",l:"alert-service",d:p.error||"no response"});
+    out.push({s:"skip",l:"notification",d:"not reached"});return out;}
+  out.push({s:"ok",l:"alert-service",d:a.was_new
+    ?`new alert raised (id ${a.alert&&a.alert.id})`
+    :"deduped — same 4-hourly bucket as an existing alert (R6)"});
+  const n=a.notification;
+  if(!a.was_new)out.push({s:"skip",l:"notification",d:"not called — dedup repeat"});
+  else if(!n)out.push({s:"err",l:"notification",d:"no response"});
+  else if(n.error)out.push({s:"err",l:"notification",d:n.error});
+  else{
+    out.push({s:"ok",l:"notification",d:`channels: ${(n.channels||[]).join(", ")}`+(n.pushed?" · pushed":"")});
+    const sms=n.sms;
+    if(!sms)out.push({s:"skip",l:"sms",d:"not attempted — below the SMS severity bar"});
+    else if(sms.sent)out.push({s:"ok",l:"sms",d:`sent to ${sms.to} (sid ${sms.provider_sid})`});
+    else if(sms.mode==="dry_run")out.push({s:"pending",l:"sms",d:`dry-run — would send to ${sms.to||"(CLINICIAN_PHONE unset)"}`});
+    else out.push({s:"err",l:"sms",d:sms.error||"not sent"});
+  }
+  if(p.context_passages)out.push({s:"ok",l:"rag-service",d:`${p.context_passages.length} context passage(s) retrieved`});
+  else if(p.context_error)out.push({s:"err",l:"rag-service",d:p.context_error});
+  return out;
+}
 function render(d,sent){
   $("out").hidden=false;$("news2").textContent=d.news2;$("tier").textContent=d.tier_icu;
   $("why").textContent=(d.would_escalate?"WOULD FIRE — ":"no alert — ")+d.why;
@@ -112,9 +166,14 @@ function render(d,sent){
     return `<div class="cell"><div class="k">${k} ${badge}</div>
             <div class="v">${v}<span class="k"> ${UNITS[k]||""}</span></div></div>`;}).join("");
   $("send").disabled=false;
-  if(d.sms){$("smsbox").hidden=false;$("sms").textContent=
-      `mode: ${d.sms.mode}\nto:   ${d.sms.to||"(provider)"}\n\n${d.sms.text}`;}
+  if(d.sms_preview){$("smsbox").hidden=false;$("sms").textContent=d.sms_preview;}
   else $("smsbox").hidden=true;
+  const steps=pipelineSteps(d.pipeline);
+  if(steps.length){
+    $("pipebox").hidden=false;
+    $("steps").innerHTML=steps.map(x=>
+      `<div class="step ${x.s}"><span class="dot"></span><b>${esc(x.l)}</b><span>${esc(x.d)}</span></div>`).join("");
+  } else $("pipebox").hidden=true;
   $("status").textContent=sent
     ?(d.sent?`Sent to ingest-gateway (HTTP ${d.gateway_status}).`
             :`Not sent — ${d.gateway_error||("gateway HTTP "+d.gateway_status)}`)
