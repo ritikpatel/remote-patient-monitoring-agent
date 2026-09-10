@@ -57,3 +57,11 @@ Across this whole fidelity range the AUPRC on real held-out patients moves by on
 **What it must never do:** appear in a training or evaluation set whose metrics are reported as performance. Train-on-synthetic/test-on-real is the only defensible protocol, and section 1 measures what it yields here: nothing.
 
 The honest conclusion stands, now with a number behind it rather than a hedge: **this cohort's confidence interval is a structural property of having 49 positive subjects, and it is not fixable within this project.** Reporting it plainly is the correct result, not a shortfall.
+
+## Follow-up: the middle of the fidelity range, measured
+
+Section 2 above carries an admitted hole. Perturbing channels independently could only produce cohorts a discriminator finds identical or trivially separable, never the intermediate fidelity the question was posed at, so the answer rested on the perfect-generator argument of section 1 rather than on a generator that actually lives in that band.
+
+[`ml/synthetic/`](../synthetic/report.md) closes it. EMR-WGAN (Yan et al., JMIR AI 2024) trained on this cohort reaches a dimension-wise distance inside the range that paper reports for its own runs on 181,294 patients, and it changes nothing here: across 20 paired comparisons no augmented arm beats the real-only baseline, the best of six sitting at -0.0006 AUPRC with 10 of 20 wins. Fidelity was never the binding constraint, and now that has been measured with a real generator rather than argued from a resampler.
+
+That work also surfaced something this experiment could not have: the EMR-WGAN cohort carries **membership-inference risk two-thirds of the way from chance to publishing the real records**, verified against a swap control. Synthetic data from a cohort this small is not de-identified data.
