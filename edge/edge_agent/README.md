@@ -60,8 +60,15 @@ Only 2 scoring round trips for 240 observations is correct, not a fault:
 `EscalationLoop` throttles per patient in *stream* time, so a 20-minute watch
 stream scores twice rather than 240 times. `escalated: 0` is also correct --
 `make-demo` generates a healthy 72 bpm patient. Driving the same chain with a
-deteriorating stream (`simulators/morphing.py --sink http`) raises a real alert:
-`NEWS2 6: single-parameter red flag (RCP 2017): hr, spo2 scoring 3`.
+deteriorating stream raises a real alert
+(`NEWS2 6: single-parameter red flag (RCP 2017): hr, spo2 scoring 3`):
+
+```bash
+python -m simulators.home_kit_stream --stay-id <a stay that deteriorated> \
+    --kit full_home --sink http --gateway-url http://localhost:8000
+```
+
+`--list-candidates` prints the stays that qualify.
 
 **Found by running it:** `infra/compose/docker-compose.yml` did not set
 `RISK_ENGINE_URL` or `ALERT_SERVICE_URL` on stream-processor, and the loop only
@@ -74,8 +81,16 @@ A watch observation only reaches NEWS2 scoring if it carries a scoring channel
 (`hr`, `rr`, `spo2`, `sbp`, `temp_c`, `gcs_total`, `fio2` — see
 `services/stream-processor/escalation.py`). The demo batch stream emits `hr` and
 an `activity_index`, so it exercises transport and the HR limb; a full
-deterioration scenario needs `simulators/morphing.py`, which synthesises the
-SpO2 the Empatica hardware cannot measure.
+deterioration scenario needs `simulators/home_kit_stream.py`, whose `watch_only`
+kit carries `hr` and `spo2` and whose `full_home` kit adds `rr`, `sbp`, `map`
+and `glucose`.
+
+That module replaced the retired `wearable_replay.py` + `morphing.py` pair, and
+the replacement matters for what this demo can claim: the old path *synthesised*
+a deterioration onto a healthy volunteer's recording and fabricated the SpO2 its
+hardware could not measure, whereas `home_kit_stream.py` replays a MIMIC patient
+who genuinely deteriorated and simulates only the device layer. The physiology
+here is real; the instrument is not.
 
 ## Try it without any hardware or broker
 

@@ -128,6 +128,7 @@ capstone-rpm/
 ├── simulators/                        # real_event_replay, home_kit_stream, arrival_models
 ├── notes_synth/                       # LLM note generation + fact ledger
 ├── ml/{features,models,evaluation}/
+├── ml/synthetic/                      # EMR-WGAN synthetic EHR generation + quality battery
 ├── services/                          # 9 FastAPI microservices
 ├── edge/{wear_os,edge_agent}/
 ├── ui/                                # clinician dashboard + mobile notification view
@@ -281,6 +282,18 @@ Given n=140, methodology carries the credibility:
   an unused option, because the target deployment is post-discharge monitoring where no 12-lead ECG exists.
 - SHAP attribution surfaced through `risk-engine` so every alert carries a reason.
 - All runs logged to MLflow; the promoted model is a registry artefact, not a pickle in a folder.
+- **Synthetic augmentation** — **measured and rejected, not skipped** (`ml/synthetic/`, added after
+  the phases closed). `ml/evaluation/reliability.py` establishes that the only remaining lever on this
+  model's interval is more patients; full MIMIC-IV is credentialed access, so the question is whether a
+  generative model can manufacture the difference. The EMR-WGAN tutorial (Yan et al., JMIR AI
+  2024;3:e52615) was implemented in full and the implementation is faithful enough for the answer to
+  count — dimension-wise distance **1.44** against the 0.52-1.56 the paper reports on 181,294 patients.
+  It buys nothing here: no augmented arm beats the real-only baseline over 20 paired comparisons (best
+  **-0.0006 AUPRC, 10/20 wins**), and generating whole class-balanced *patients* raises positive
+  subjects from 39 per fold to **539** while AUPRC moves **-0.0337**. Section 17's rule applies to the
+  output as much as to the numbers: the synthetic cohort carries membership-inference risk of **0.84**
+  against a 0.51 chance floor, so it is **not de-identified and is not shareable** — which is the one
+  use the method exists for.
 
 ---
 

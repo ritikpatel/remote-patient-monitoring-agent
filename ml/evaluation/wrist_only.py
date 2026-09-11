@@ -7,7 +7,7 @@ a wrist wearable can supply 9 of them -- the HR family. Everything else it wants
 no sensor on a wrist. So `risk-engine`'s ML path
 cannot run post-discharge at all, and `reports/post_discharge_digest.py`
 accordingly uses no model -- it scores a NEWS2 HR+SpO2 proxy over
-`simulators/morphing.py`'s synthetic trajectory.
+`simulators/home_kit_stream.py`'s replay of a real deteriorating MIMIC stay.
 
 This module gives the post-discharge arm its first real, honestly-scoped number by
 restricting the feature set to what a wearable actually measures and re-running the
@@ -243,9 +243,11 @@ def write_report(summary, beats_rule, beats_news2, spo2_gain, vs_full, args, n_f
         f"{spo2_gain[0]} of {spo2_gain[1]} repeats "
         f"({cons['auprc_point']:.3f} vs {strict['auprc_point']:.3f} AUPRC). If a device is "
         f"being chosen for the post-discharge arm, this is the specification that changes the "
-        f"answer -- and it is exactly the channel the Empatica E4 in this project does not have "
-        f"(which is why `simulators/morphing.py` has to fabricate SpO2 outright rather than "
-        f"morph it from a real recording).",
+        f"answer -- and it is exactly the channel the Empatica E4 in this project does not have. "
+        f"That gap is why the wearable arm was retired: `simulators/morphing.py` had to "
+        f"fabricate SpO2 outright rather than morph it from a real recording. "
+        f"`simulators/home_kit_stream.py` replaced it and inverts the problem -- SpO2 is "
+        f"real, charted physiology from a MIMIC stay, and only the device layer is simulated.",
         "",
         f"**A two-channel wrist beats the seven-vital ward standard.** The consumer wrist "
         f"model scores {cons['auprc_point']:.3f} AUPRC against hospital NEWS2's "

@@ -17,32 +17,32 @@ needing to poll for it.
 ```mermaid
 %%{init: {"flowchart": {"rankSpacing": 50, "nodeSpacing": 40, "curve": "monotoneY"}}}%%
 flowchart TD
-    START(["Composite health event\ne.g. HR 145 · SpO2 89% · SBP 88\n(composed in event-studio, or any\nof the 5 real producers)"])
+    START(["Composite health event<br/>e.g. HR 145 · SpO2 89% · SBP 88<br/>(composed in event-studio, or any<br/>of the 5 real producers)"])
 
-    S1["① ingest-gateway :8000\nvalidates the Observation contract,\nchecks the API key"]
+    S1["① ingest-gateway :8000<br/>validates the Observation contract,<br/>checks the API key"]
 
-    S2["② risk-engine :8001\nPOST /score/live\ncomputes NEWS2 + ICU tier from the vitals"]
+    S2["② risk-engine :8001<br/>POST /score/live<br/>computes NEWS2 + ICU tier from the vitals"]
 
-    D1{"should_escalate()?\nwarehouse/news2.py — one shared function\n① ICU tier = high, OR\n② a single parameter scores red, OR\n③ GCS falls ≥2 pts /4h off sedation"}
+    D1{"should_escalate()?<br/>warehouse/news2.py — one shared function<br/>① ICU tier = high, OR<br/>② a single parameter scores red, OR<br/>③ GCS falls ≥2 pts /4h off sedation"}
 
-    NOFIRE(["No alert.\nScored, logged, nothing further happens."])
+    NOFIRE(["No alert.<br/>Scored, logged, nothing further happens."])
 
-    S3["③ alert-service :8005\nraises the alert; checks the 4-hour\ndedup window (R6) for this patient"]
+    S3["③ alert-service :8005<br/>raises the alert; checks the 4-hour<br/>dedup window (R6) for this patient"]
 
-    D2{"a genuinely\nnew alert?"}
+    D2{"a genuinely<br/>new alert?"}
 
-    DEDUP(["Dedup repeat.\nExisting alert's repeat-count increments;\nnothing renotified — R6"])
+    DEDUP(["Dedup repeat.<br/>Existing alert's repeat-count increments;<br/>nothing renotified — R6"])
 
-    S4["④ notification-gateway :8006\nthe one place a new alert fans out from"]
+    S4["④ notification-gateway :8006<br/>the one place a new alert fans out from"]
 
-    S5A["Dashboard\nlive WebSocket broadcast\nto the clinician's browser"]
-    S5B["Push notification\nFCM to the clinician's phone"]
-    S5C["Email — only if severity = high\nservices/common/email.py, guarded:\ndry-run unless EMAIL_MODE=live,\nforces [SYNTHETIC DRILL]\n(live-demonstrated: SMTP, free)"]
-    S5D["SMS — only if severity = high\nservices/common/sms.py, guarded:\ndry-run unless SMS_MODE=live,\nforces [SYNTHETIC DRILL]\n(wired, configurable: needs Twilio)"]
+    S5A["Dashboard<br/>live WebSocket broadcast<br/>to the clinician's browser"]
+    S5B["Push notification<br/>FCM to the clinician's phone"]
+    S5C["Email — only if severity = high<br/>services/common/email.py, guarded:<br/>dry-run unless EMAIL_MODE=live,<br/>forces [SYNTHETIC DRILL]<br/>(live-demonstrated: SMTP, free)"]
+    S5D["SMS — only if severity = high<br/>services/common/sms.py, guarded:<br/>dry-run unless SMS_MODE=live,<br/>forces [SYNTHETIC DRILL]<br/>(wired, configurable: needs Twilio)"]
 
     ALERT(["ALERT DELIVERED"])
 
-    SIDE["On-demand, not in this path:\nagent-orchestrator's 6-node LangGraph\nadds a cited narrative + LLM advisory\nwhen a clinician opens the patient —\nsame should_escalate() function,\nnever the reverse"]
+    SIDE["On-demand, not in this path:<br/>agent-orchestrator's 6-node LangGraph<br/>adds a cited narrative + LLM advisory<br/>when a clinician opens the patient —<br/>same should_escalate() function,<br/>never the reverse"]
 
     START --> S1 --> S2 --> D1
     D1 -->|no| NOFIRE
