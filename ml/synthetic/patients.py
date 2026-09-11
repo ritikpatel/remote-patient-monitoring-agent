@@ -347,26 +347,3 @@ def engineer_range(vital: str) -> tuple[float, float]:
     from ml.synthetic.preprocess import PLAUSIBLE_RANGES
 
     return PLAUSIBLE_RANGES.get(vital, (-np.inf, np.inf))
-
-
-def build_feature_matrix(
-    grid: pd.DataFrame, static_columns: list[str], template: pd.DataFrame
-) -> pd.DataFrame:
-    """Recompute derived features from generated vitals and match the real schema.
-
-    This is the step that makes a synthetic patient internally coherent: the 36
-    rolling features are computed from the trajectory just generated, by the same
-    `engineer.add_rolling_features` the real pipeline calls, rather than being
-    emitted as free-standing columns a generator had to learn to keep consistent.
-    """
-    enriched = engineer.add_rolling_features(grid)
-
-    for column in template.columns:
-        if column not in enriched.columns:
-            enriched[column] = np.nan
-        if column in static_columns or column in grid.columns:
-            continue
-    matrix = enriched.reindex(columns=["stay_id", "hour", *template.columns])
-    for column in template.columns:
-        matrix[column] = matrix[column].astype(template[column].dtype, errors="ignore")
-    return matrix
