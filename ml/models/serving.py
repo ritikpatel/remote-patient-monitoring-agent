@@ -127,6 +127,62 @@ def scope_for_hour(hour: int) -> dict:
     }
 
 
+# --- Severity grading ----------------------------------------------------------
+# The alerting chain needs the model to say *how bad*, not just *how likely*: a
+# raised alert graded "high" is what triggers the agent's care-plan node and the
+# escalation email, and grading everything "high" (which is what the pipeline did
+# before this existed -- EscalationLoop hardcoded severity="high" on every alert it
+# raised) makes the grade carry no information at all.
+#
+# The cut-points are percentiles of the promoted model's own **out-of-fold** score
+# distribution, computed at promotion time and written into the manifest. Three
+# deliberate choices in that sentence:
+#
+# * **Percentiles, not calibrated probabilities.** Deliberately the same device E5
+#   used for NEWS2, and it inherits the same caveat: this grades a patient relative
+#   to this cohort, and is not a clinically validated severity scale. A raw
+#   probability threshold would imply a calibration claim this model has not earned
+#   (see ml/evaluation/report.md's Brier/reliability section).
+# * **Out-of-fold, not in-sample.** In-sample predictions on a boosted model are
+#   sharply optimistic, so in-sample percentiles would put the "high" cut-point far
+#   too high and grade real deterioration as medium.
+# * **Persisted in the manifest, not recomputed at serving time.** Same reason
+#   warehouse/news2.py persists its NEWS2 cut-points: a threshold recomputed
+#   independently by each consumer is a threshold that drifts between them.
+SEVERITY_PERCENTILE_MEDIUM, SEVERITY_PERCENTILE_HIGH = 0.75, 0.90
+SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH = "low", "medium", "high"
+
+
+def severity_cutpoints_from_scores(oof_scores: np.ndarray) -> dict:
+    """The two cut-points, from a vector of out-of-fold predicted probabilities."""
+    return {
+        "medium": float(np.quantile(oof_scores, SEVERITY_PERCENTILE_MEDIUM)),
+        "high": float(np.quantile(oof_scores, SEVERITY_PERCENTILE_HIGH)),
+        "percentile_medium": SEVERITY_PERCENTILE_MEDIUM,
+        "percentile_high": SEVERITY_PERCENTILE_HIGH,
+        "n_oof_scores": int(len(oof_scores)),
+    }
+
+
+def grade_severity(probability: float, cutpoints: dict | None) -> str | None:
+    """Probability -> low/medium/high, or None when the manifest carries no
+    cut-points.
+
+    Returning None rather than defaulting to "low" (or to "high") is the point: an
+    export predating this feature genuinely cannot grade, and a consumer must be able
+    to tell "the model says low" apart from "the model was never asked". The alerting
+    chain treats None as "not gradeable" and falls back to the deterministic path
+    rather than silently suppressing or silently paging.
+    """
+    if not cutpoints:
+        return None
+    if probability >= cutpoints["high"]:
+        return SEVERITY_HIGH
+    if probability >= cutpoints["medium"]:
+        return SEVERITY_MEDIUM
+    return SEVERITY_LOW
+
+
 def score_one(conn: duckdb.DuckDBPyConnection, stay_id: int, hour: int) -> dict:
     model, manifest = load_promoted_model()
     feature_columns = manifest["feature_columns"]
@@ -154,11 +210,15 @@ def score_one(conn: duckdb.DuckDBPyConnection, stay_id: int, hour: int) -> dict:
         for name, value in top.items()
     ]
 
+    cutpoints = manifest.get("severity_cutpoints")
     return {
         "probability": proba,
+        "severity": grade_severity(proba, cutpoints),
+        "severity_cutpoints": cutpoints,
         "model_name": manifest["model_name"],
         "horizon_h": manifest["horizon_h"],
         "cv_auprc_point_estimate": manifest["cv_auprc_point_estimate"],
+        "disease_features": manifest.get("disease_features"),
         "reasons": reasons,
         **scope_for_hour(hour),
     }

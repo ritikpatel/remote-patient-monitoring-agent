@@ -57,6 +57,14 @@ class RiskScoreResponse(BaseModel):
     red_params: list[str] = []
     gcs_drop: bool = False
     escalation_recommended: bool = False
+    # Which threshold escalated this patient. `tier_icu` is now fitted per
+    # primary-diagnosis chapter where that chapter had enough stays to earn its own
+    # cut-point (warehouse/news2.py), so "NEWS2 tier is high" is no longer a single
+    # global statement -- a consumer that wants to say *which* threshold fired needs
+    # these two, and without them a disease-specific escalation is indistinguishable
+    # from a pooled one.
+    dx_group: str | None = None
+    threshold_is_disease_specific: bool = False
 
 
 @app.get("/health")
@@ -70,7 +78,8 @@ def score(stay_id: int, hour: int) -> RiskScoreResponse:
     try:
         news2_row = conn.execute(
             "SELECT news2, tier_ward, tier_icu, hr, rr, spo2, sbp, temp_c, gcs_total, fio2, "
-            "max_component, max_component_nongcs, red_params, gcs_drop "
+            "max_component, max_component_nongcs, red_params, gcs_drop, "
+            "dx_group, threshold_is_disease_specific "
             "FROM capstone.news2 WHERE stay_id = ? AND hour = ?",
             [stay_id, hour],
         ).fetchone()
@@ -91,6 +100,8 @@ def score(stay_id: int, hour: int) -> RiskScoreResponse:
             max_component_nongcs,
             red_params,
             gcs_drop,
+            dx_group,
+            threshold_is_disease_specific,
         ) = news2_row
 
         sofa_row = conn.execute(
@@ -115,6 +126,8 @@ def score(stay_id: int, hour: int) -> RiskScoreResponse:
             red_params=[p for p in (red_params or "").split(",") if p],
             gcs_drop=bool(gcs_drop),
             escalation_recommended=should_escalate(tier_icu, max_component_nongcs, gcs_drop),
+            dx_group=dx_group,
+            threshold_is_disease_specific=bool(threshold_is_disease_specific),
         )
     finally:
         conn.close()
@@ -175,6 +188,11 @@ class LiveVitals(BaseModel):
 class LiveScoreRequest(BaseModel):
     patient_ref: str
     vitals: LiveVitals
+    # The patient's primary-diagnosis chapter, when the caller knows it. A replay of
+    # a warehouse stay does; a wearable stream genuinely does not, which is why this
+    # is optional rather than required -- an unknown diagnosis falls back to the
+    # pooled ICU cut-points, exactly as before per-disease thresholds existed.
+    dx_group: str | None = None
 
 
 class LiveScoreResponse(BaseModel):
@@ -191,6 +209,8 @@ class LiveScoreResponse(BaseModel):
     escalation_recommended: bool
     escalation_reason: str
     reason: list[str]
+    dx_group: str | None = None
+    threshold_is_disease_specific: bool = False
 
 
 @app.post("/score/live", response_model=LiveScoreResponse)
@@ -213,6 +233,7 @@ def score_live(req: LiveScoreRequest) -> LiveScoreResponse:
     import pandas as pd
     from warehouse.news2 import (
         GCS_DROP_POINTS,
+        POOLED_GROUP,
         escalation_reason,
         load_thresholds,
         news2_row,
@@ -243,7 +264,7 @@ def score_live(req: LiveScoreRequest) -> LiveScoreResponse:
 
     conn = get_conn()
     try:
-        thresholds = load_thresholds(conn)
+        thresholds = load_thresholds(conn, req.dx_group)
     finally:
         conn.close()
 
@@ -269,6 +290,9 @@ def score_live(req: LiveScoreRequest) -> LiveScoreResponse:
         escalation_recommended=should_escalate(tier_icu, max_nongcs, gcs_drop),
         escalation_reason=reason,
         reason=_explain(v.hr, v.rr, v.spo2, v.sbp, v.temp_c, v.gcs_total, v.fio2),
+        dx_group=thresholds.dx_group,
+        threshold_is_disease_specific=not thresholds.is_fallback
+        and thresholds.dx_group != POOLED_GROUP,
     )
 
 

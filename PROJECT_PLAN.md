@@ -47,13 +47,19 @@ Every design rule in this plan derives from one of these.
 | E7 | All six SOFA organ systems computable | Vasopressors 52, vent 66, urine 137 stays, labs 100% | `mimic-code` concept SQL is reusable |
 | E8 | Sepsis-3 reachable | 121 admissions have both an antibiotic order and a culture | Sepsis pathway viable |
 | E9 | ~~ECG links to the clinical cohort~~ **(retired)** | 92/100 patients, 12-lead 500 Hz, 10 s | Fusion was built and measured, then **removed from the project**: it hurt the model (5/20 paired repeats, mean per-repeat delta −0.015) and a post-discharge patient has no 12-lead ECG. Dataset deleted; see `ml/evaluation/feature_pruning_report.md` |
-| E10 | Wearables are healthy volunteers | Median age ~21 vs ICU median 63; no patient link | Transport/DSP testbed only. Deterioration scenarios require documented morphing |
+| E10 | ~~Wearables are healthy volunteers~~ **(retired)** | Median age ~21 vs ICU median 63; no patient link; **zero deterioration events** | Dataset **removed from the project**. It could never contain the outcome the platform predicts, so keeping it as a testbed meant every finding from it needed a standing caveat. The post-discharge arm is now driven by `simulators/home_kit_stream.py`: a **real deteriorating MIMIC patient** degraded to what a home sensor kit could observe — real physiology, simulated instrument |
 | E11 | No `note` module | Confirmed in dataset README | Synthetic narrative required |
 | E12 | Admission burst is an **ordering** burst | Transfers 7.5×, orders 2.9×, but ICU monitoring only 1.31×; peak 33.7 ev/pt/hr vs 18.2 baseline | Simulator needs per-family arrival models. Size load tests at 33.7, not the mean |
 | E13 | Discharge taper (4.7×) exceeds the admission burst (1.4×) | 16.9% of events in first 10% of stay vs 3.6% in last 10% | Stay-relative windows leak. Anchor to hours-since-ICU-admission |
 | E14 | Monitoring collapses at ICU step-down | ICU families hold to ~55–60% of stay then fall off a cliff | The motivating finding. Justifies the post-discharge arm |
 | E15 | Measurement intensity tracks outcome, but is confounded | Naive 13.5×; all 15 deaths were ICU patients; within-ICU it is **3.2×** | Event-rate features are legitimate but must be normalised by care setting |
 | E16 | Care runs on a **4-hourly clock** | 48.4% of events on 00/04/08/12/16/20 vs 25% uniform. Labs peak 05:00, meds 08:00, orders 10:00 | Alerts cluster into six daily bursts. Dedup must align to the rhythm; overnight path required |
+| E17 | Vital autocorrelation decays **within hours** | Within-stay ACF crosses 1/e at lag 1–5h (HR and temp ~5h, RR and MAP ~1h) and is ~0 by 24h (0.02–0.10) | The **4h** window is a state estimate matched to the decorrelation time; the **24h** window is a wide-baseline *volatility* estimate, not a "patient baseline". Explains why 24h `std` survived pruning and 24h `mean` was the largest single gain from removal (notebook 03 §3) |
+| E18 | A third of vital variance is **between patients** | Mean ICC 0.32 (`gcs_total` 0.57, `hr` 0.48, `temp_c` 0.12); 26 of 100 subjects have >1 ICU stay | Grouped CV must split on `subject_id`, never `stay_id`: measured optimism when wrong is **+0.0499 AUPRC**. Patient-constant features (`gender`, `first_careunit`, the 17 comorbidity flags) amplify a bad split by acting as a partial patient identifier (notebook 03 §4) |
+| E19 | Composite events happen **almost immediately on ICU admission**, and the modal event is intubation | Median first event at **ICU hour 1.2**; 49% inside the first hour, 85% inside 6h. Mix: ventilation 43, vasopressor 28, ICU readmission 5, death 2 | **Narrows what the headline number means.** Much of the task is "will this patient be intubated shortly after arriving", which for an emergency or post-operative transfer is often an already-decided action rather than an unforeseen deterioration. Report performance **excluding** the first 6 ICU hours as a secondary, and consider a task variant censoring the first hour or two (notebook 03 §7) |
+| E20 | MIMIC contains **no physiology after discharge** | `admissions` records discharge/readmit/death *times*; no observation rows exist after `dischtime`. The three channels a home kit cannot measure have no correlate among those it can (max \|r\| 0.09–0.22) | The post-discharge arm has **no target-domain labels** and cannot be trained — only transferred to and bounded. Construct it explicitly as a transfer: train on ICU physiology, evaluate under home-kit channel masks (`ml/evaluation/home_kit_transfer.py`), and never present the result as a validated post-discharge model (notebook 03 §5, §7) |
+| E21 | 30-day readmission is the **best-conditioned task** in this dataset | 53 readmissions in 260 live discharges (**20.4%**) against the hourly task's 4.0%; 48 of 100 patients have >1 admission (mean 2.75, max 20); discharge disposition separates trajectories cleanly | Readmission is admission-level tabular, not time series, and its prediction time is *at discharge* — which makes the **full ICD code set, procedures, discharge medications, LOS and prior-admission count all legitimate**, unlike for the hourly model. Rebuilt in `ml/evaluation/readmission.py`: the corrected cohort + care-transition features beat the previous ICU-physiology model in **19/20 paired repeats** (AUPRC 0.239 -> 0.282), but the AUROC interval 0.412-0.590 still includes 0.5 — the feature set was mis-specified *and* the cohort is too small to certify a model. Both halves are reported (notebook 02, `readmission_report.md`) |
+| E22 | Prediction time, not the feature, decides whether a diagnosis code leaks | `dx_chapter` alone scores AUPRC **0.0392 against a 0.0403 base rate** on the hourly task — at chance, no detectable leak *and* no gain. The same column is fully legitimate for readmission, where coding precedes prediction | Split disease features by provenance: `chronic` (Charlson, pre-existing) for the hourly and post-discharge arms; the whole coded record for readmission. A shared "patient history" feature store cannot be reused naively across the three tasks (notebook 02 §4, `ml/evaluation/disease_leakage_report.md`) |
 
 ---
 
@@ -104,8 +110,11 @@ near-stationary with a 4-hourly comb for monitoring. One global rate is wrong in
 **R6 — Align alert deduplication to the 4-hourly clock.** (E16) Otherwise clinicians see six synchronised
 walls of alerts per day.
 
-**R7 — Never present replayed or morphed data as measured.** (E1, E10) Every figure, table and slide
-derived from replay or morphing carries that label inline.
+**R7 — Never present replayed or simulated data as measured.** (E1, E20) Every figure, table and slide
+derived from replay or from a simulated sensor layer carries that label inline. For the post-discharge
+arm the split is precise and must be stated that way: the patient, their deterioration and their hourly
+vitals are **real MIMIC records**; the device cadence, measurement noise, non-wear gaps and all
+within-hour detail are **simulated** (`simulators/home_kit_stream.py`).
 
 ---
 
@@ -113,10 +122,10 @@ derived from replay or morphing carries that label inline.
 
 ```
 capstone-rpm/
-├── data/{raw,interim,processed}/      # raw gitignored; symlinks to the three dataset folders
+├── data/{raw,interim,processed}/      # raw gitignored; symlink to the MIMIC-IV demo folder
 ├── notebooks/01_capstone_eda.ipynb    # the completed EDA (already built)
 ├── warehouse/                         # DuckDB build + mimic-code concepts + hourly grid
-├── simulators/                        # real_event_replay, wearable_replay, morphing, arrival_models
+├── simulators/                        # real_event_replay, home_kit_stream, arrival_models
 ├── notes_synth/                       # LLM note generation + fact ledger
 ├── ml/{features,models,evaluation}/
 ├── services/                          # 9 FastAPI microservices
@@ -137,7 +146,7 @@ capstone-rpm/
 3. GitHub Actions from day one: lint → unit tests → build all service images → integration smoke.
    Production-grade means CI exists before the code it guards, not after.
 4. MLflow for model registry and experiment tracking; DVC for the synthetic-notes artefact.
-5. `docs/DATA_USE.md` — PhysioNet DUA terms for all three datasets, and the rule that no raw data enters
+5. `docs/DATA_USE.md` — PhysioNet DUA terms for the MIMIC-IV demo, and the rule that no raw data enters
    git.
 
 ---
@@ -182,12 +191,13 @@ survive the demo subset.
    Bursty for orders/transfers, near-stationary with a 4-hourly comb for monitoring.
 3. `simulators/real_event_replay.py` — replays `hourly_grid` at configurable time compression (1 h → 1 s), using
    the arrival models rather than a uniform tick.
-4. `simulators/wearable_replay.py` — true-rate Empatica streaming (BVP 64 Hz, ACC 32 Hz, EDA/TEMP 4 Hz,
-   HR 1 Hz). Honour `data_constraints.txt`: `f07` PPG/temp invalid, `S02` duplicated blocks, and
-   `f14_a/b`, `S11_a/b`, `S16_a/b` as split sessions. These are useful fault fixtures, not nuisances.
-5. `simulators/morphing.py` — condition wearable segments on a target NEWS2 trajectory (HR baseline shift,
-   HRV suppression, SpO2 desaturation) so post-discharge deterioration scenarios exist (**E10**). Output is
-   watermarked as synthetic (**R7**).
+4. `simulators/home_kit_stream.py` — stream a **real deteriorating MIMIC patient** as a home monitoring
+   kit would see them (**E20**). Replaces the retired `wearable_replay.py` + `morphing.py` pair and
+   inverts what is synthetic: those synthesised a deterioration onto a healthy volunteer's real recording,
+   this one takes real deterioration and simulates the *instrument*. Three named kits (`watch_only`,
+   `watch_plus_cuff`, `full_home`), per-channel cadence and measurement noise, block-structured non-wear
+   gaps, and carried-forward hours never emitted as fresh readings. Output is watermarked synthetic
+   (**R7**) and carries a `Subject/<id>` reference, never `ICUStay/<id>`.
 6. `edge/wear_os/` — Wear OS app sampling HR + accelerometer, batching over BLE to `edge/edge_agent/`,
    which buffers offline, computes windowed features locally, and publishes to MQTT (EMQX) with
    client-cert auth. MQTT→Kafka bridge lives in `ingest-gateway`.
@@ -289,7 +299,7 @@ Given n=140, methodology carries the credibility:
 **Automated clinical reports** (`reports/`) — the missing declared output:
 - Shift handover summary per ward, generated on the 4-hourly boundary (**E16**).
 - Daily patient summary with trajectory, interventions and outstanding risks.
-- Post-discharge weekly digest from wearable telemetry.
+- Post-discharge weekly digest from home-kit telemetry (real days of a real patient; simulated device).
 - All rendered from the agent `Summarizer` with fact-ledger citations, exported to PDF and FHIR
   `DocumentReference`.
 
@@ -382,9 +392,10 @@ are meaningless), or the audit log (it is a deliverable in its own right).
 Every artefact — report, slides, README, dashboard footer — states on first mention:
 
 > This platform is validated on a 100-patient demo subset of MIMIC-IV. Clinical narrative is LLM-generated
-> from structured data. Wearable deterioration signals are synthetically morphed from healthy-volunteer
-> recordings. The engineering is real and the methodology is rigorous; the clinical performance figures
-> demonstrate pipeline validity and do not transfer to clinical practice.
+> from structured data. Post-discharge signals are real MIMIC physiology passed through a simulated home
+> sensor layer, and the post-discharge model is a transfer from ICU data with no post-discharge labels.
+> The engineering is real and the methodology is rigorous; the clinical performance figures demonstrate
+> pipeline validity and do not transfer to clinical practice.
 
 This belongs in the opening paragraph, not a footnote. With 20 ICU deaths and 53 readmissions, no clinical
 claim from this data generalises — and saying so plainly is what makes the rest of the work credible.

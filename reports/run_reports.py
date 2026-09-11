@@ -4,7 +4,7 @@ data assembly -> LLM narrative -> PDF -> FHIR DocumentReference.
 Usage:
     python reports/run_reports.py shift-handover --ward "Medical Intensive Care Unit (MICU)"
     python reports/run_reports.py daily-summary --stay-id 30057454 --day 0
-    python reports/run_reports.py post-discharge-digest --activity STRESS --participant S01
+    python reports/run_reports.py post-discharge-digest --stay-id 30955999
 """
 
 from __future__ import annotations
@@ -102,9 +102,11 @@ def run_daily_summary(stay_id: int, day: int, conn: duckdb.DuckDBPyConnection) -
     print(f"Wrote {out_path}")
 
     # The one report type with an unambiguous single FHIR subject -- see
-    # reports/README.md for why shift-handover (ward-wide, no single patient)
-    # and the post-discharge digest (wearable participants have no MIMIC
-    # patient link, E10) do not export a DocumentReference.
+    # reports/README.md for why shift-handover (ward-wide, no single patient) does
+    # not export a DocumentReference. The post-discharge digest now *does* trace to
+    # a real MIMIC stay (it is a simulated home kit over a real patient), but its
+    # observations are watermarked synthetic, so exporting them as a clinical
+    # DocumentReference would put simulated device readings into a patient record.
     ids = conn.execute(
         "select subject_id, hadm_id from mimiciv_icu.icustays where stay_id = ?", [stay_id]
     ).fetchone()
@@ -121,25 +123,35 @@ def run_daily_summary(stay_id: int, day: int, conn: duckdb.DuckDBPyConnection) -
     return out_path
 
 
-def run_post_discharge_digest(activity: str, participant: str) -> Path:
-    result = build_post_discharge_digest(activity, participant, llm=_default_llm())
-    lines = "\n".join(
-        f"Day {b.day_index}: HR {b.mean_hr:.0f} bpm, SpO2 {b.mean_spo2:.0f}%, "
-        f"HRV {b.hrv_rmssd_ms:.0f} ms"
-        for b in result.daily_buckets
-    )
+def run_post_discharge_digest(stay_id: int, kit: str) -> Path:
+    result = build_post_discharge_digest(stay_id, llm=_default_llm(), kit_name=kit)
+    lines = []
+    for b in result.daily_buckets:
+        if not b.means:
+            lines.append(f"Day {b.day_index}: no readings (device not worn)")
+            continue
+        lines.append(
+            f"Day {b.day_index}: "
+            + ", ".join(f"{c} {v:.0f}" for c, v in sorted(b.means.items()))
+            + f"  ({b.n_samples:,} samples)"
+        )
+    no_sensor = ", ".join(result.provenance["channels_with_no_home_sensor"])
     sections = [
         ReportSection("Digest narrative", result.narrative),
-        ReportSection("Daily wearable summary (morphed, demo-compressed)", lines),
+        ReportSection("Daily home-kit summary (real days)", "\n".join(lines)),
+        ReportSection(
+            "What this kit cannot measure",
+            f"No home sensor exists for: {no_sensor} (and arterial-line presence is "
+            f"always false at home). HRV (RMSSD) is omitted rather than approximated: "
+            f"MIMIC charts heart rate hourly, not beat-to-beat, so it is not "
+            f"computable from this source.",
+        ),
     ]
-    out_path = OUTPUT_DIR / f"post_discharge_digest_{participant}.pdf"
+    out_path = OUTPUT_DIR / f"post_discharge_digest_{stay_id}.pdf"
     render_pdf(
         out_path,
-        title=f"Post-discharge weekly digest — {participant}",
-        generated_note=(
-            "Morphed wearable telemetry, compressed into a demo session standing in "
-            "for a week (R7) -- not a claim that a week was actually recorded."
-        ),
+        title=f"Post-discharge weekly digest — {result.subject_ref}",
+        generated_note=result.provenance["watermark"],
         sections=sections,
         citations=[],
     )
@@ -159,13 +171,13 @@ def main() -> int:
     p2.add_argument("--day", type=int, default=0)
 
     p3 = sub.add_parser("post-discharge-digest")
-    p3.add_argument("--activity", default="STRESS")
-    p3.add_argument("--participant", default="S01")
+    p3.add_argument("--stay-id", type=int, required=True)
+    p3.add_argument("--kit", default="full_home")
 
     args = parser.parse_args()
 
     if args.report_type == "post-discharge-digest":
-        run_post_discharge_digest(args.activity, args.participant)
+        run_post_discharge_digest(args.stay_id, args.kit)
         return 0
 
     conn = duckdb.connect(str(DEFAULT_DB_PATH), read_only=True)

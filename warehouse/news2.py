@@ -301,6 +301,32 @@ def escalation_reason(
     return " AND ".join(limbs)
 
 
+# --- Per-disease recalibration -------------------------------------------------
+# E5 recalibrated the ward cut-points to the ICU *population*. That fixed the wrong
+# base rate but left one threshold for every patient, so a post-cardiac-surgery stay
+# and a septic stay are escalated on the same number. This axis is the per-disease
+# extension: the same 75th/90th percentile rule, evaluated within each primary-
+# diagnosis chapter (`capstone.disease_context`).
+#
+# The reason this is guarded rather than simply applied everywhere: a percentile
+# taken over patient-hours has a far smaller *effective* sample than its row count
+# suggests, because hours within a stay are strongly correlated -- a 40-hour stay is
+# closer to one observation than to forty. So the guard counts STAYS, not hours, and
+# a chapter below the bar falls back to the pooled ICU cut-point rather than getting
+# a cut-point fitted to a handful of patients. In this 140-stay demo exactly one
+# chapter clears it (Circulatory, 41 stays); the next is Infectious at 18. That is
+# the honest outcome at this n, not a failure of the mechanism -- on the 4,000-5,000
+# patient build `ml/evaluation/reliability.py` sizes, most chapters clear it easily.
+#
+# The bootstrap below is what makes the bar reviewable instead of asserted: every
+# chapter's cut-points are resampled over stays and the report carries the interval,
+# so a reader can see how wide the ones we rejected actually were.
+POOLED_GROUP = "__pooled__"
+MIN_STAYS_FOR_GROUP_THRESHOLD = 20
+GROUP_THRESHOLD_BOOTSTRAP_N = 500
+GROUP_THRESHOLD_BOOTSTRAP_SEED = 0
+
+
 @dataclass(frozen=True)
 class Thresholds:
     """The aggregate cut-points that turn a NEWS2 score into a tier.
@@ -311,21 +337,125 @@ class Thresholds:
     disagree about what "high" means. Before F3 they existed only as two local
     variables in main() and two numbers in news2_report.md, so live scoring was not
     expressible at all.
+
+    ``dx_group`` names the primary-diagnosis chapter these cut-points were fitted to,
+    or ``POOLED_GROUP`` for the cohort-wide ones. ``is_fallback`` is True when a
+    caller asked for a specific disease group and got the pooled numbers because that
+    group was below ``MIN_STAYS_FOR_GROUP_THRESHOLD`` -- a consumer that wants to say
+    "escalated on a cardiac-specific threshold" needs to be able to tell that apart
+    from "escalated on the general one", and silently returning the pooled row would
+    make that indistinguishable.
     """
 
     ward_medium: int
     ward_high: int
     icu_medium: int
     icu_high: int
+    dx_group: str = POOLED_GROUP
+    is_fallback: bool = False
 
 
-def load_thresholds(conn: duckdb.DuckDBPyConnection) -> Thresholds:
+def load_thresholds(conn: duckdb.DuckDBPyConnection, dx_group: str | None = None) -> Thresholds:
+    """Cut-points for one disease group, falling back to the pooled ICU ones.
+
+    ``dx_group=None`` returns the pooled row -- the pre-existing behaviour and still
+    the right answer for any caller that does not know the patient's diagnosis (a
+    wearable stream, for instance, has no ICD code at all).
+    """
+    if dx_group is not None and dx_group != POOLED_GROUP:
+        row = conn.execute(
+            "SELECT ward_medium, ward_high, icu_medium, icu_high FROM "
+            "capstone.news2_thresholds WHERE dx_group = ?",
+            [dx_group],
+        ).fetchone()
+        if row is not None:
+            # Unpacked by name rather than splatted: mypy cannot tell how many
+            # items the generator yields, so a splat looks like it might also be
+            # filling dx_group/is_fallback.
+            ward_medium, ward_high, icu_medium, icu_high = (int(v) for v in row)
+            return Thresholds(
+                ward_medium,
+                ward_high,
+                icu_medium,
+                icu_high,
+                dx_group=dx_group,
+                is_fallback=False,
+            )
+
     row = conn.execute(
-        "SELECT ward_medium, ward_high, icu_medium, icu_high FROM capstone.news2_thresholds"
+        "SELECT ward_medium, ward_high, icu_medium, icu_high FROM "
+        "capstone.news2_thresholds WHERE dx_group = ?",
+        [POOLED_GROUP],
     ).fetchone()
     if row is None:
         raise RuntimeError("capstone.news2_thresholds is empty -- run warehouse/news2.py")
-    return Thresholds(*(int(v) for v in row))
+    ward_medium, ward_high, icu_medium, icu_high = (int(v) for v in row)
+    return Thresholds(
+        ward_medium,
+        ward_high,
+        icu_medium,
+        icu_high,
+        dx_group=POOLED_GROUP,
+        is_fallback=dx_group is not None and dx_group != POOLED_GROUP,
+    )
+
+
+def _cut_points(scores: pd.Series) -> tuple[int, int]:
+    """The 75th/90th-percentile rule, with the non-degeneracy guard applied once
+    here rather than repeated at every call site."""
+    medium = int(scores.quantile(ICU_PERCENTILE_MEDIUM))
+    high = int(scores.quantile(ICU_PERCENTILE_HIGH))
+    return medium, max(high, medium + 1)
+
+
+def group_thresholds(
+    grid: pd.DataFrame,
+    stay_groups: pd.DataFrame,
+    min_stays: int = MIN_STAYS_FOR_GROUP_THRESHOLD,
+    n_bootstrap: int = GROUP_THRESHOLD_BOOTSTRAP_N,
+    seed: int = GROUP_THRESHOLD_BOOTSTRAP_SEED,
+) -> pd.DataFrame:
+    """Per-disease-chapter cut-points, with a stay-level bootstrap interval.
+
+    ``grid`` needs ``stay_id`` and ``news2``; ``stay_groups`` maps ``stay_id`` ->
+    ``dx_group``. Returns one row per chapter with the cut-points it *would* get,
+    its stay count, the bootstrap interval on the high cut-point, and whether it
+    clears ``min_stays``. Every chapter appears, including rejected ones -- the
+    report prints them all so the guard can be argued with.
+
+    Resampling is over STAYS with replacement, not over rows: bootstrapping rows
+    would treat 40 correlated hours from one patient as 40 independent draws and
+    report an interval several times too narrow, which is exactly the error the
+    guard exists to avoid making.
+    """
+    rng = np.random.default_rng(seed)
+    joined = grid.merge(stay_groups, on="stay_id", how="left")
+    rows = []
+    for dx_group, g in joined.groupby("dx_group"):
+        stays = g.stay_id.unique()
+        medium, high = _cut_points(g.news2)
+        by_stay = {sid: s.news2 for sid, s in g.groupby("stay_id")}
+
+        boot_high = []
+        for _ in range(n_bootstrap):
+            picked = rng.choice(stays, size=len(stays), replace=True)
+            resampled = pd.concat([by_stay[sid] for sid in picked])
+            boot_high.append(_cut_points(resampled)[1])
+        lo, hi = np.percentile(boot_high, [2.5, 97.5])
+
+        rows.append(
+            {
+                "dx_group": dx_group,
+                "stays": len(stays),
+                "patient_hours": len(g),
+                "icu_medium": medium,
+                "icu_high": high,
+                "high_ci_lo": float(lo),
+                "high_ci_hi": float(hi),
+                "own_threshold": len(stays) >= min_stays,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("stays", ascending=False).reset_index(drop=True)
 
 
 def tier_for_score(score: int, medium: int, high: int) -> str:
@@ -416,12 +546,48 @@ def main() -> int:
         )
 
     # --- ICU-recalibrated thresholds (E5) ---
-    icu_medium = int(grid.news2.quantile(ICU_PERCENTILE_MEDIUM))
-    icu_high = int(grid.news2.quantile(ICU_PERCENTILE_HIGH))
-    icu_high = max(
-        icu_high, icu_medium + 1
-    )  # keep tiers non-degenerate if the distribution is flat
-    grid["tier_icu"] = tier(grid.news2, icu_medium, icu_high)
+    icu_medium, icu_high = _cut_points(grid.news2)
+    grid["tier_icu_pooled"] = tier(grid.news2, icu_medium, icu_high)
+
+    # --- Per-disease recalibration (see POOLED_GROUP's comment block) ---
+    stay_groups = conn.execute(
+        "SELECT stay_id, dx_chapter AS dx_group FROM capstone.disease_context"
+    ).fetchdf()
+    groups = group_thresholds(grid[["stay_id", "news2"]], stay_groups)
+    print(
+        f"\nPer-disease cut-points ({len(groups)} chapters, "
+        f"min {MIN_STAYS_FOR_GROUP_THRESHOLD} stays for its own):"
+    )
+    print(groups.to_string(index=False))
+
+    # Effective cut-points per stay: its chapter's if that chapter cleared the bar,
+    # the pooled ones otherwise. Built as an explicit per-stay frame rather than a
+    # groupby-apply so a stay whose chapter is missing entirely still gets a row.
+    own = groups[groups.own_threshold].set_index("dx_group")
+    effective = stay_groups.copy()
+    effective["icu_medium"] = [
+        int(own.icu_medium[g]) if g in own.index else icu_medium for g in effective.dx_group
+    ]
+    effective["icu_high"] = [
+        int(own.icu_high[g]) if g in own.index else icu_high for g in effective.dx_group
+    ]
+    effective["threshold_is_disease_specific"] = [g in own.index for g in effective.dx_group]
+
+    grid = grid.merge(effective, on="stay_id", how="left")
+    grid["icu_medium"] = grid.icu_medium.fillna(icu_medium).astype(int)
+    grid["icu_high"] = grid.icu_high.fillna(icu_high).astype(int)
+    grid["dx_group"] = grid.dx_group.fillna(POOLED_GROUP)
+    grid["threshold_is_disease_specific"] = grid.threshold_is_disease_specific.fillna(False)
+    grid["tier_icu"] = [
+        tier_for_score(int(s), int(m), int(h))
+        for s, m, h in zip(grid.news2, grid.icu_medium, grid.icu_high, strict=True)
+    ]
+    n_own = int(groups.own_threshold.sum())
+    n_moved = int((grid.tier_icu != grid.tier_icu_pooled).sum())
+    print(
+        f"\nDisease-specific thresholds moved {n_moved:,} of {len(grid):,} patient-hours "
+        f"({n_moved / len(grid) * 100:.1f}%) to a different tier than the pooled cut-point"
+    )
 
     TIER_RANK = {"low": 0, "medium": 1, "high": 2}
 
@@ -464,11 +630,44 @@ def main() -> int:
 
     conn.execute("CREATE SCHEMA IF NOT EXISTS capstone")
     conn.execute("DROP TABLE IF EXISTS capstone.news2_thresholds")
-    conn.execute(
-        "CREATE TABLE capstone.news2_thresholds AS SELECT "
-        f"{WARD_MEDIUM} AS ward_medium, {WARD_HIGH} AS ward_high, "
-        f"{icu_medium} AS icu_medium, {icu_high} AS icu_high"
+    # One row per disease group that earned its own cut-point, plus the pooled row.
+    # The ward columns are the RCP constants and do not vary by group -- they are
+    # carried on every row so a consumer reads one row and has everything, rather
+    # than joining a group row to the pooled row for half its answer.
+    threshold_rows = pd.DataFrame(
+        [
+            {
+                "dx_group": POOLED_GROUP,
+                "ward_medium": WARD_MEDIUM,
+                "ward_high": WARD_HIGH,
+                "icu_medium": icu_medium,
+                "icu_high": icu_high,
+                "stays": int(grid.stay_id.nunique()),
+            },
+            *(
+                {
+                    "dx_group": r.dx_group,
+                    "ward_medium": WARD_MEDIUM,
+                    "ward_high": WARD_HIGH,
+                    # pandas-stubs types itertuples() attributes as a wide
+                    # Scalar union; these columns are integers by construction.
+                    "icu_medium": int(r.icu_medium),  # type: ignore[arg-type]
+                    "icu_high": int(r.icu_high),  # type: ignore[arg-type]
+                    "stays": int(r.stays),  # type: ignore[arg-type]
+                }
+                for r in groups[groups.own_threshold].itertuples()
+            ),
+        ]
     )
+    conn.register("thresholds_df", threshold_rows)
+    conn.execute("CREATE TABLE capstone.news2_thresholds AS SELECT * FROM thresholds_df")
+    conn.unregister("thresholds_df")
+    conn.execute("DROP TABLE IF EXISTS capstone.news2_group_thresholds")
+    conn.register("group_thresholds_df", groups)
+    conn.execute(
+        "CREATE TABLE capstone.news2_group_thresholds AS SELECT * FROM group_thresholds_df"
+    )
+    conn.unregister("group_thresholds_df")
     conn.execute("DROP TABLE IF EXISTS capstone.news2")
     conn.register("news2_df", grid)
     conn.execute("CREATE TABLE capstone.news2 AS SELECT * FROM news2_df")
@@ -505,6 +704,36 @@ everyone here is already sick enough to be in the ICU. The ICU-recalibrated cut-
 instead flag the {100 * (1 - ICU_PERCENTILE_MEDIUM):.0f}% of this cohort's own
 patient-hours with the highest NEWS2, i.e. relative deterioration within an ICU
 population rather than absolute deterioration relative to a ward population.
+
+## Per-disease recalibration
+
+E5 fixed the base rate but left one cut-point for every patient: a post-cardiac-surgery
+stay and a septic stay escalate on the same number. The same 75th/90th-percentile rule
+is therefore evaluated *within* each primary-diagnosis chapter
+(`capstone.disease_context`, built by `warehouse/disease.py`).
+
+A chapter gets its own cut-point only if it has at least
+**{MIN_STAYS_FOR_GROUP_THRESHOLD} stays**; otherwise it falls back to the pooled ICU
+numbers above. The guard counts *stays*, not patient-hours, because hours within a
+stay are strongly correlated -- a 40-hour stay is much closer to one observation than
+to forty, so a row-count bar would wave through chapters with three patients in them.
+The `high_ci_lo`/`high_ci_hi` columns are a 500-sample bootstrap of the high cut-point
+**resampled over stays**, which is what makes that claim checkable rather than
+asserted: read down the rejected rows and the intervals visibly blow out.
+
+{groups.to_markdown(index=False)}
+
+At this cohort size exactly **{n_own} of {len(groups)} chapters** clears the bar. That
+is the honest result at n=140, not a defect in the mechanism -- the code path is
+general, and on the 4,000-5,000 patient build `ml/evaluation/reliability.py` sizes,
+most chapters clear it comfortably. Applying the disease-specific cut-points moved
+**{n_moved:,} of {len(grid):,} patient-hours ({100 * n_moved / len(grid):.1f}%)** into a
+different tier than the pooled cut-point would have given them.
+
+`capstone.news2` carries both `tier_icu` (disease-specific where one was earned, which
+is what `should_escalate` reads) and `tier_icu_pooled` (the previous behaviour), plus
+`threshold_is_disease_specific` so a consumer can say *which* threshold escalated a
+patient rather than having to guess.
 
 ## Single-parameter escalation (finding F1)
 

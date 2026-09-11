@@ -207,16 +207,23 @@ curl -s http://localhost:8005/alerts/active | .venv/bin/python -m json.tool
 382 observations → gateway → Kafka → stream-processor → risk-engine → alert-service. Expect ~49
 scored, ~22 escalated, and **one** alert: the 4-hourly dedup (R6) collapsing the repeats.
 
-Now the same engine, a completely different producer:
+Now the same engine, a completely different producer — the post-discharge arm:
 ```bash
-.venv/bin/python simulators/wearable_replay.py --activity STRESS --participant S05 \
-  --duration-s 900 --sink http --no-sleep
+.venv/bin/python simulators/home_kit_stream.py --list-candidates
+.venv/bin/python simulators/home_kit_stream.py --stay-id 30955999 --kit full_home \
+  --sink http --gateway-url http://localhost:8000
 ```
-152,097 observations at true device rate (BVP 64 Hz), and **zero alerts** — because this is a
-healthy volunteer. That is the point worth making out loud: the sick patient alerts, the healthy
-one does not, through one engine with no per-source logic. (Until F3 let the wearable path reach
-the scorer, it would have raised a false hypothermia alert on every subject — E4 `TEMP` is wrist
-skin temperature, not core.)
+A **real deteriorating MIMIC patient** streamed as a home monitoring kit would see them —
+`Subject/HOME-<stay_id>`, `device_id=home-kit-sim`, every observation flagged `synthetic`. The
+point worth making out loud is that this reaches the *same* engine with no per-source logic: the
+channels a home kit cannot measure (core temperature, GCS, FiO2) simply never arrive, and
+`/score/live` scores what it is given.
+
+This replaced `simulators/wearable_replay.py`, which streamed a healthy volunteer who by
+construction never alerted. That dataset was removed from the project (E10 retired): healthy
+21-year-olds with zero deterioration events could not exercise the alerting path in the direction
+that matters. See `simulators/README.md` for exactly which parts of this stream are real and which
+are simulated.
 
 **f-bis. The edge device's own path — MQTT, not the HTTP replay above**
 

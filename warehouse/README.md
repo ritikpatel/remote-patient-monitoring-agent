@@ -8,11 +8,39 @@ standard ICU severity score. PROJECT_PLAN.md section 7.
 ```bash
 python warehouse/build_duckdb.py    # schema + load 31 CSVs -> mimiciv_hosp / mimiciv_icu
 python warehouse/run_concepts.py    # 65 mimic-code concepts -> mimiciv_derived
-python warehouse/hourly_grid.py     # capstone.hourly_grid   (12,004 patient-hours)
-python warehouse/news2.py           # capstone.news2         (ward-standard + ICU-recalibrated)
+python warehouse/hourly_grid.py     # capstone.hourly_grid    (12,004 patient-hours)
+python warehouse/disease.py         # capstone.disease_context (140 stays, 14 dx chapters)
+python warehouse/news2.py           # capstone.news2          (ward, ICU, and per-disease)
 ```
 
 Each script is idempotent — re-running it drops and rebuilds only its own tables.
+`disease.py` must run **before** `news2.py`: the per-disease recalibration groups on
+`capstone.disease_context.dx_chapter`.
+
+## Disease context and per-disease thresholds
+
+`disease.py` builds one row per ICU stay carrying the primary diagnosis's ICD chapter
+and the 17 Charlson chronic-comorbidity flags. The two are deliberately kept apart,
+because they sit on opposite sides of a leakage line: ICD codes are assigned by billing
+coders **after discharge**, while Charlson scores *pre-existing chronic* burden.
+`ml/evaluation/disease_leakage.py` measures both rather than assuming either — see that
+report for the result (no detectable leak, and no AUPRC gain at this cohort size).
+
+`news2.py` then recalibrates the ICU escalation cut-points **within each diagnosis
+chapter**, guarded by a minimum of 20 stays — counted as *stays*, not patient-hours,
+since hours within one stay are strongly correlated. In this 140-stay demo exactly one
+chapter clears that bar:
+
+| Chapter | Stays | medium | high | vs pooled |
+|---|---|---|---|---|
+| `__pooled__` (fallback) | 140 | 9 | 10 | — |
+| Circulatory | 41 | 7 | 9 | escalates earlier |
+
+Every other chapter falls back to the pooled cut-point. `capstone.news2` carries both
+`tier_icu` (disease-specific where earned — this is what `should_escalate` reads) and
+`tier_icu_pooled` (the previous behaviour), plus `threshold_is_disease_specific` so a
+consumer can say *which* threshold escalated a patient. See `news2_report.md` for every
+chapter's cut-points and their stay-level bootstrap intervals.
 
 ## Building from the full MIMIC-IV release
 
@@ -64,7 +92,7 @@ and containment of every loaded row within the cohort.
 |---|---|---|
 | `mimiciv_hosp`, `mimiciv_icu` | Raw MIMIC-IV demo tables, unmodified | `build_duckdb.py` |
 | `mimiciv_derived` | 65 vendored mimic-code concepts (SOFA, SAPS-II, OASIS, SIRS, Charlson, Sepsis-3, kdigo, vasoactive dosing, …) | `run_concepts.py`, SQL vendored in `mimic-iv/concepts_duckdb/` — see `mimic-iv/VENDORED.md` |
-| `capstone` | This project's own derived tables: `hourly_grid`, `news2` | `hourly_grid.py`, `news2.py` |
+| `capstone` | This project's own derived tables: `hourly_grid`, `disease_context`, `news2`, `news2_thresholds`, `news2_group_thresholds` | `hourly_grid.py`, `disease.py`, `news2.py` |
 
 ## Current status (last full rebuild)
 

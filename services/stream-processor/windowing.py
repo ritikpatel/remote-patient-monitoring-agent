@@ -50,10 +50,15 @@ def trend_slope(timestamps_hours: list[float], values: list[float]) -> float:
 
 def hrv_rmssd(ibi_seconds: list[float]) -> float:
     """RMSSD (root mean square of successive differences between inter-beat
-    intervals), in milliseconds -- the standard time-domain HRV metric, and the one
-    simulators/morphing.py's HRV-suppression transform is designed to be measured
-    with (it shrinks exactly this kind of successive-difference variability).
+    intervals), in milliseconds -- the standard time-domain HRV metric.
     Needs >=2 IBI values to define a single successive difference.
+
+    Retained after the volunteer wearable dataset was removed, because its consumer
+    is a real device rather than that dataset: `edge/edge_agent` reads beat-to-beat
+    intervals off a BLE chest strap or watch and posts them to stream-processor's
+    `/hrv`. MIMIC cannot feed this -- it charts heart rate hourly, not beat-to-beat --
+    which is exactly why `reports/post_discharge_digest.py` now omits HRV rather than
+    approximating it from hourly HR.
     """
     if len(ibi_seconds) < 2:
         return 0.0

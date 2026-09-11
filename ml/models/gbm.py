@@ -14,7 +14,12 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-CATEGORICAL_COLUMNS = ["gender", "first_careunit"]
+# `dx_chapter` joins the two pre-existing categoricals when a disease-aware
+# feature set is in play (ml/features/engineer.DISEASE_CATEGORICAL_COLUMNS).
+# _present_categoricals below already tolerates a name that is absent, which is
+# what makes the "none"/"chronic" feature sets -- which have no dx_chapter column
+# at all -- fit without a separate estimator.
+CATEGORICAL_COLUMNS = ["gender", "first_careunit", "dx_chapter"]
 
 
 def _present_categoricals(x: pd.DataFrame) -> list[str]:

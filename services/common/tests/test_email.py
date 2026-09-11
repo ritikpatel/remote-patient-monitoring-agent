@@ -152,3 +152,125 @@ def test_compose_is_generic_over_the_headline_both_real_callers_use():
     assert email.DRILL_MARKER in b.subject
     assert "NEWS2 9" in a.body
     assert "HIGH alert" in b.body
+
+
+# ---------------------------------------------------------------------------
+# The clinical assessment agent-orchestrator attaches to a high-severity alert
+# ---------------------------------------------------------------------------
+
+
+def _assessment(**overrides) -> dict:
+    base = {
+        "assessable": True,
+        "condition": "Sepsis, unspecified organism",
+        "dx_chapter": "Infectious",
+        "comorbidities": ["renal_disease", "congestive_heart_failure"],
+        "charlson_comorbidity_index": 7,
+        "news2": 11,
+        "news2_tier_icu": "high",
+        "dx_group": "Circulatory",
+        "threshold_is_disease_specific": True,
+        "severity": "high",
+        "ml_probability": 0.912,
+        "ml_in_validated_scope": True,
+        "care_plan": {
+            "recommended_actions": "- Recheck lactate\n- Contact the on-call intensivist",
+            "citations": [{"passage_id": "G003", "fact_ids": ["F001", "F002"]}],
+            "generated": True,
+        },
+        "summary": "Patient deteriorating on a background of sepsis.",
+    }
+    return {**base, **overrides}
+
+
+def test_an_assessment_puts_the_diagnosis_and_plan_in_the_body():
+    """Before this, the entire email was "NEWS2 9: tier is high" -- true, and nearly
+    useless at 3am because it says nothing about who the patient is or what to do."""
+    content = email.compose("ICUStay/1", "HIGH alert", "NEWS2 11", assessment=_assessment())
+
+    assert "Sepsis, unspecified organism" in content.body
+    assert "renal_disease" in content.body
+    assert "Recheck lactate" in content.body
+    assert "G003" in content.body, "a recommendation must carry its grounding"
+    assert "F001" in content.body, "fact-ledger ids make a note claim traceable"
+
+
+def test_the_body_says_which_threshold_escalated_the_patient():
+    """`tier_icu` is now fitted per diagnosis chapter where one was earned, so "tier
+    is high" is no longer a single global statement. A clinician reading the page
+    should be able to tell which threshold fired."""
+    disease_specific = email.compose(
+        "ICUStay/1", "HIGH alert", "NEWS2 11", assessment=_assessment()
+    )
+    pooled = email.compose(
+        "ICUStay/1",
+        "HIGH alert",
+        "NEWS2 11",
+        assessment=_assessment(threshold_is_disease_specific=False),
+    )
+
+    assert "disease-specific threshold (Circulatory)" in disease_specific.body
+    assert "pooled ICU threshold" in pooled.body
+
+
+def test_an_out_of_scope_model_score_carries_a_caution():
+    """The model's validated scope is the first 6 ICU hours. A score from outside it
+    must not reach a clinician looking like one from inside it."""
+    content = email.compose(
+        "ICUStay/1",
+        "HIGH alert",
+        "NEWS2 11",
+        assessment=_assessment(
+            ml_in_validated_scope=False, ml_scope_note="Outside the model's validated scope."
+        ),
+    )
+
+    assert "CAUTION" in content.body
+
+
+def test_a_deterministic_fallback_plan_is_labelled_as_not_generated():
+    """A template must never be mistaken for clinical reasoning an LLM produced."""
+    content = email.compose(
+        "ICUStay/1",
+        "HIGH alert",
+        "NEWS2 11",
+        assessment=_assessment(
+            care_plan={"recommended_actions": "Recommend urgent review.", "generated": False}
+        ),
+    )
+
+    assert "Deterministic fallback" in content.body
+
+
+def test_a_skipped_care_plan_says_why_rather_than_going_quiet():
+    content = email.compose(
+        "ICUStay/1",
+        "HIGH alert",
+        "NEWS2 9",
+        assessment=_assessment(
+            care_plan=None, care_plan_skipped_reason="no care plan: severity is medium"
+        ),
+    )
+
+    assert "severity is medium" in content.body
+
+
+def test_an_unassessable_patient_composes_exactly_the_old_message():
+    """A wearable volunteer has no chart. The email must degrade to what it always
+    was, not to an empty template with blank headers."""
+    with_none = email.compose("Subject/S05", "HIGH alert", "HR 148")
+    unassessable = email.compose(
+        "Subject/S05", "HIGH alert", "HR 148", assessment={"assessable": False}
+    )
+
+    assert with_none.body == unassessable.body
+    assert "Clinical context" not in with_none.body
+
+
+def test_the_drill_marker_survives_an_attached_assessment():
+    """Guard 3 blocks any body missing the marker. A regression here would silently
+    stop every high-severity page from sending."""
+    content = email.compose("ICUStay/1", "HIGH alert", "NEWS2 11", assessment=_assessment())
+
+    assert email.DRILL_MARKER in content.body
+    assert email.DRILL_MARKER in content.subject

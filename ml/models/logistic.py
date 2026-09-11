@@ -22,7 +22,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-CATEGORICAL_COLUMNS = ["gender", "first_careunit"]
+CATEGORICAL_COLUMNS = ["gender", "first_careunit", "dx_chapter"]
 
 
 def build_pipeline(feature_columns: list[str]) -> Pipeline:

@@ -59,6 +59,8 @@ dev = [
     "mypy>=1.10.0",
     "pre-commit>=3.7.0",
     "pytest>=8.2.0",
+    "nbconvert>=7.17.1",
+    "ipykernel>=7.3.0",
 ]
 
 [tool.ruff]

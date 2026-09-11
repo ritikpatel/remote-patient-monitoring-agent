@@ -44,19 +44,29 @@ rather than glossing over it:
 - **Post-discharge digest** (`post_discharge_digest.py`) needs no such
   reconciliation because it isn't MIMIC data at all -- see below.
 
-## The post-discharge digest is morphed, and says so first
+## The post-discharge digest: real days, simulated device
 
-R7: "never present replayed or morphed data as measured." The wearable
-cohort is healthy volunteers with no ICU link (E10), so a genuine week of
-post-discharge deterioration cannot come from real data. This digest reuses
-`simulators/morphing.py`'s real transforms (HR retargeting, HRV suppression,
-synthesised SpO2) conditioned on a synthetic deterioration trajectory,
-compressed into that session's actual recorded duration (tens of minutes)
-and divided into 7 buckets labelled "day 1".."day 7" to stand in for a week
--- an explicit demo compression, not a claim that a week was actually
-recorded. The LLM is instructed to say so in its first sentence
-(`DIGEST_ANTI_FABRICATION_SYSTEM`), and the PDF's provenance line says so
-before the narrative does.
+R7: "never present replayed or simulated data as measured." This digest was previously
+built from `simulators/morphing.py` — a healthy volunteer's session with a deterioration
+synthesised onto it, then a tens-of-minutes recording divided into seven buckets
+labelled "day 1".."day 7" to stand in for a week. Two compressions of reality stacked on
+each other.
+
+It is now built from `simulators/home_kit_stream.py`, and needs neither. The source is a
+**real deteriorating MIMIC ICU patient**, and those stays run to 200-500 recorded hours
+— 8 to 20 real days — so the daily buckets are **real elapsed days of real physiology**.
+The only simulated layer is the instrument: device cadence, measurement noise and
+non-wear gaps.
+
+**What was lost, and not faked to cover it.** The old digest reported HRV (RMSSD) from
+the Empatica's beat-to-beat intervals. MIMIC charts heart rate *hourly*, not
+beat-to-beat, so RMSSD is **not computable** from this source. It is absent rather than
+approximated from hourly HR, which would be a fabricated number wearing a real metric's
+name. The LLM is explicitly instructed not to infer it.
+
+An unmeasured channel is **absent from the bucket, not zero** — "not measured" and
+"measured as zero" are different clinical statements and a nurse must be able to tell
+them apart.
 
 ## FHIR DocumentReference export: only where a single subject genuinely exists
 
@@ -73,9 +83,10 @@ one:
   but building and defending a second resource type for one report is out
   of scope here, so this is stated as a limitation rather than forced into a
   bad fit.
-- A wearable participant (e.g. "S01") has no MIMIC `subject_id`/`hadm_id` at
-  all (E10: "no patient link") -- there is no `Patient`/`Encounter` pair to
-  reference.
+- The post-discharge digest now *does* trace to a real MIMIC stay, but its
+  observations are watermarked synthetic (a simulated home device over real
+  physiology). Exporting them as a clinical `DocumentReference` would put
+  simulated device readings into a patient record, so it deliberately does not.
 
 ## Rendering: real bugs an LLM narrative surfaces that hand-written text never would
 

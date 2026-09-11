@@ -63,10 +63,24 @@ reported separately so the two are never conflated. See its own
 
 ## The agent graph (`agent-orchestrator`)
 
-`VitalsMonitor -> LabInterpreter -> RiskScorer -> ContextRetriever -> EscalationDecider -> Summarizer`
-(`services/agent-orchestrator/graph.py`), and the three constraints that make it
-production-grade rather than a demo (`nodes.py`'s docstring), each backed by a test
-that *proves* it rather than just asserting it:
+`DiseaseContext -> VitalsMonitor -> LabInterpreter -> RiskScorer -> ContextRetriever
+-> EscalationDecider -> CarePlanner -> Summarizer`
+(`services/agent-orchestrator/graph.py`). Section 10's original six, plus two added
+when the platform became disease-aware:
+
+* **`DiseaseContext`** runs first because three downstream nodes need the diagnosis
+  before they can do their job — `ContextRetriever` scopes retrieval to this
+  admission and queries on clinical vocabulary rather than score arithmetic, and
+  `CarePlanner` cannot recommend anything for "a deteriorating patient" in the
+  abstract.
+* **`CarePlanner`** sits after the escalation decision (it is gated on it) and
+  before the summary. It answers *what should be done*, grounded in the retrieved
+  passages, barred from naming drug doses, and free to say the context does not
+  support a recommendation.
+
+Three constraints make the graph production-grade rather than a demo
+(`nodes.py`'s docstring), each backed by a test that *proves* it rather than just
+asserting it:
 
 1. **The LLM never computes a risk score** — `risk_scorer` only relays
    risk-engine's HTTP response (`test_nodes.py::test_risk_scorer_relays_risk_engine_verbatim`).
@@ -74,12 +88,30 @@ that *proves* it rather than just asserting it:
    wires in an LLM double that explicitly recommends *against* escalating, and
    proves the policy escalates anyway.
 3. **Every step is audited** — `services/common/audit.py`'s hash chain; a real run
-   writes 6 rows (one per node) and `verify_chain()` proves none were altered
+   writes 8 rows (one per node) and `verify_chain()` proves none were altered
    (`test_graph.py::test_audit_chain_is_intact_after_a_full_run`).
 
+A fourth division of authority came with severity grading: **NEWS2 gates, the
+learned model grades.** `warehouse.news2.should_escalate` still decides *whether* an
+alert exists — unchanged, deterministic, no vote for the model. The disease-aware
+model then grades that existing alert low/medium/high, which decides whether a care
+plan is generated and whether a human is paged. Every fallback in
+`alert-service._graded_severity` points toward paging: an ungraded alert, an
+unassessable patient, a failed assessment, or a score **outside the model's validated
+6-hour scope** all keep the deterministic severity. The only alert the model can
+silence is one it grades low from inside the window where it was measured to work.
+
+`POST /assess` is the alerting entry point: `alert-service` calls it once per
+genuinely new alert — behind the 4-hourly dedup, so it runs per *alert*, not per
+observation, which is why this does not violate `stream-processor/escalation.py`'s
+rule against invoking the agent per streamed vital sign.
+
 A real end-to-end run (Groq LLM, real risk-engine/rag-service, real warehouse data)
-produced a well-grounded clinical summary with zero fabricated values — see the
-session transcript or re-run `notes_synth`'s pattern with `GroqBackend`.
+produced a well-grounded clinical summary with zero fabricated values. The whole
+disease-aware chain — alert → agent → learned model → patient-scoped RAG → care plan
+→ email — is reproducible with `python eval/disease_aware_chain.py`, which wires all
+five real service apps together and prints the escalation email a clinician would
+receive.
 
 ## Real Docker verification
 

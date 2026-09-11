@@ -1,31 +1,51 @@
-"""Post-discharge weekly digest from wearable telemetry (PROJECT_PLAN.md
+"""Post-discharge weekly digest from home-kit telemetry (PROJECT_PLAN.md
 section 12).
 
-**R7, stated as plainly as the module docstring it comes from
-(simulators/morphing.py): the wearable cohort is healthy volunteers with no
-ICU link (E10), so a genuine week of post-discharge deterioration cannot come
-from real data.** This digest is built from `simulators/morphing.py`'s real
-morphing transforms conditioned on a synthetic deterioration trajectory,
-compressed into that session's actual recorded duration (tens of minutes,
-not seven days) and divided evenly into 7 buckets labelled "day 1".."day 7"
-to stand in for a week -- an explicit demo compression, not a claim that a
-week was actually recorded. Every value in this report is watermarked
-accordingly, and the report text says so before it says anything else.
+**Rewritten when the volunteer wearable dataset was removed from the project.**
+The previous version built this digest from `simulators/morphing.py`: a healthy
+21-year-old's Empatica session with a deterioration *synthesised onto it*, then a
+tens-of-minutes recording divided into seven buckets labelled "day 1".."day 7" to
+stand in for a week. Two compressions of reality stacked on each other -- an
+invented deterioration and an invented week.
+
+This version needs neither. `simulators/home_kit_stream.py` streams a **real
+deteriorating MIMIC ICU patient** through a simulated home sensor kit, and those
+stays are genuinely long: the candidate list runs to 200-500 recorded hours, i.e.
+8-20 real days. So the daily buckets here are **real elapsed days of a real
+patient's real physiology**, and the only synthetic layer is the instrument --
+device cadence, measurement noise and non-wear gaps (R7; see that module's
+docstring for exactly which parts are simulated and which are recorded).
+
+**What was lost, and not faked to cover it.** The old digest reported HRV (RMSSD)
+from the Empatica's beat-to-beat inter-beat intervals. MIMIC charts heart rate
+hourly, not beat-to-beat, so RMSSD is **not computable** from this source. It is
+therefore absent rather than approximated from hourly HR, which would be a
+fabricated number wearing a real metric's name. The digest reports what a home kit
+on this patient would actually have: HR, SpO2, respiratory rate, cuff blood
+pressure and CGM glucose, per real day.
 """
 
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
+import duckdb
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from services.common.testing import load_module  # noqa: E402
-from simulators.morphing import MorphConfig, morph_session  # noqa: E402
+from simulators.home_kit_stream import (  # noqa: E402
+    DEFAULT_DB_PATH,
+    DEFAULT_KIT,
+    HOME_KITS,
+    NO_HOME_SENSOR,
+    SYNTHETIC_WATERMARK,
+    build_stream,
+)
 
 from reports.narrative import (  # noqa: E402
     ANTI_FABRICATION_INSTRUCTION,
@@ -33,105 +53,132 @@ from reports.narrative import (  # noqa: E402
     generate_narrative,
 )
 
-_windowing = load_module(
-    REPO_ROOT / "services" / "stream-processor" / "windowing.py",
-    "reports_post_discharge_windowing",
-)
-hrv_rmssd = _windowing.hrv_rmssd
-
-N_DEMO_DAYS = 7
+# A week's digest. Unlike the previous version this is a *window* over a longer
+# real record, not a compression of a short one into a fictional week.
+N_DIGEST_DAYS = 7
 
 DIGEST_ANTI_FABRICATION_SYSTEM = (
-    "You write a post-discharge weekly wearable-telemetry digest for a remote "
-    "monitoring nurse from the structured per-day facts given. Every value "
-    "you were given is from morphed (synthetically conditioned) wearable "
-    "data compressed to stand in for a week -- say so explicitly in your "
-    "response, in your first sentence. " + ANTI_FABRICATION_INSTRUCTION
+    "You write a post-discharge weekly home-monitoring digest for a remote "
+    "monitoring nurse from the structured per-day facts given. The patient and "
+    "their physiology are real de-identified ICU records; the home device layer "
+    "(sampling cadence, measurement noise, non-wear gaps) is simulated -- say so "
+    "explicitly in your response, in your first sentence. Note that HRV is not "
+    "reported because it is not computable from this source; do not infer it. "
+    + ANTI_FABRICATION_INSTRUCTION
 )
+
+# Channel -> the unit to render it in, for the fact lines handed to the LLM.
+_UNITS = {
+    "hr": "bpm",
+    "rr": "/min",
+    "spo2": "%",
+    "sbp": "mmHg",
+    "map": "mmHg",
+    "glucose": "mg/dL",
+}
 
 
 @dataclass
-class DailyWearableBucket:
-    day_index: int  # 1-7, standing in for a calendar day
-    mean_hr: float
-    mean_spo2: float
-    hrv_rmssd_ms: float
+class DailyHomeKitBucket:
+    """One real elapsed day. ``means`` holds only the channels that actually had a
+    sample that day -- a channel absent from the dict was not measured, which is a
+    different statement from a channel measured as zero, and a nurse reading the
+    digest needs to be able to tell those apart."""
+
+    day_index: int
+    means: dict[str, float]
+    n_samples: int
 
 
 @dataclass
 class PostDischargeDigest:
-    participant: str
-    activity: str
-    start_score: float
-    end_score: float
-    daily_buckets: list[DailyWearableBucket]
+    stay_id: int
+    subject_ref: str
+    kit: str
+    daily_buckets: list[DailyHomeKitBucket]
     narrative: str
+    provenance: dict
 
 
 def build_post_discharge_digest(
-    activity: str,
-    participant: str,
+    stay_id: int,
     llm: LLMBackend | None,
-    start_score: float = 0.0,
-    end_score: float = 6.0,
-    duration_s: float = 600.0,
+    kit_name: str = DEFAULT_KIT,
+    db_path: Path = DEFAULT_DB_PATH,
+    n_days: int = N_DIGEST_DAYS,
+    seed: int = 0,
 ) -> PostDischargeDigest:
-    config = MorphConfig(start_score=start_score, end_score=end_score)
-    channels = morph_session(activity, participant, config, duration_s=duration_s)
+    """Digest the first ``n_days`` real days of one stay's simulated home stream."""
+    kit = HOME_KITS[kit_name]
+    conn = duckdb.connect(str(db_path), read_only=True)
+    try:
+        observations, provenance = build_stream(conn, stay_id, kit, seed=seed)
+    finally:
+        conn.close()
+    if not observations:
+        raise ValueError(f"no home-kit observations produced for stay_id={stay_id}")
 
-    hr_times = channels["hr"].times if "hr" in channels else np.array([])
-    hr_values = channels["hr"].values if "hr" in channels else np.array([])
-    spo2_times = channels["spo2"].times
-    spo2_values = channels["spo2"].values
-    ibi_times = channels["ibi"].times if "ibi" in channels else np.array([])
-    ibi_values = channels["ibi"].values if "ibi" in channels else np.array([])
+    # Bucket by real elapsed day from the first observation.
+    start = observations[0].effective_time
+    code_to_channel = {
+        code: channel
+        for channel, code in ((c, _channel_code(c)) for c in kit.channels)
+        if code is not None
+    }
 
-    session_start = min((t[0] for t in (hr_times, spo2_times, ibi_times) if len(t)), default=None)
-    session_end = max((t[-1] for t in (hr_times, spo2_times, ibi_times) if len(t)), default=None)
-    if session_start is None or session_end is None:
-        raise ValueError(f"no channels produced for {activity}/{participant}")
-    span = (session_end - session_start) / np.timedelta64(1, "s")
-
-    buckets = []
-    for day in range(1, N_DEMO_DAYS + 1):
-        bucket_start = session_start + np.timedelta64(
-            int((day - 1) / N_DEMO_DAYS * span * 1e9), "ns"
-        )
-        bucket_end = session_start + np.timedelta64(int(day / N_DEMO_DAYS * span * 1e9), "ns")
-
-        hr_mask = (hr_times >= bucket_start) & (hr_times < bucket_end)
-        spo2_mask = (spo2_times >= bucket_start) & (spo2_times < bucket_end)
-        ibi_mask = (ibi_times >= bucket_start) & (ibi_times < bucket_end)
-
+    buckets: list[DailyHomeKitBucket] = []
+    for day in range(1, n_days + 1):
+        lo = start + timedelta(days=day - 1)
+        hi = start + timedelta(days=day)
+        in_day = [o for o in observations if lo <= o.effective_time < hi]
+        by_channel: dict[str, list[float]] = {}
+        for obs in in_day:
+            channel = code_to_channel.get(obs.code)
+            if channel is not None:
+                by_channel.setdefault(channel, []).append(obs.value)
         buckets.append(
-            DailyWearableBucket(
+            DailyHomeKitBucket(
                 day_index=day,
-                mean_hr=float(np.mean(hr_values[hr_mask])) if hr_mask.any() else float("nan"),
-                mean_spo2=(
-                    float(np.mean(spo2_values[spo2_mask])) if spo2_mask.any() else float("nan")
-                ),
-                hrv_rmssd_ms=hrv_rmssd(list(ibi_values[ibi_mask])) if ibi_mask.any() else 0.0,
+                means={c: float(np.mean(v)) for c, v in by_channel.items()},
+                n_samples=len(in_day),
             )
         )
 
-    facts = "\n".join(
-        f"- Day {b.day_index}: mean HR {b.mean_hr:.1f} bpm, mean SpO2 {b.mean_spo2:.1f}%, "
-        f"HRV (RMSSD) {b.hrv_rmssd_ms:.1f} ms"
-        for b in buckets
-    )
+    fact_lines = []
+    for b in buckets:
+        if not b.means:
+            fact_lines.append(f"- Day {b.day_index}: no readings (device not worn)")
+            continue
+        parts = ", ".join(
+            f"{c} {b.means[c]:.1f} {_UNITS.get(c, '')}".strip()
+            for c in kit.channels
+            if c in b.means
+        )
+        fact_lines.append(f"- Day {b.day_index}: {parts} ({b.n_samples:,} samples)")
+
     user = (
-        f"Participant: {participant} (morphed from a real {activity.lower()}-session "
-        f"wearable recording, {span:.0f}s compressed to stand in for {N_DEMO_DAYS} days)\n"
-        f"Target deterioration trajectory: NEWS2 HR+SpO2 subscore {start_score} -> {end_score}\n"
-        f"{facts}"
+        f"Patient: {provenance['subject_ref']} (real MIMIC ICU stay {stay_id}, "
+        f"physiology recorded; home device layer simulated)\n"
+        f"Assumed home kit '{kit.name}': {', '.join(kit.channels)}\n"
+        f"Channels with no home sensor, therefore absent: "
+        f"{', '.join(NO_HOME_SENSOR)}\n"
+        f"HRV (RMSSD): not computable from hourly-charted HR -- omitted, do not infer\n"
+        f"Non-wear hours in the record: {provenance['nonwear_hours']}\n" + "\n".join(fact_lines)
     )
     narrative = generate_narrative(llm, DIGEST_ANTI_FABRICATION_SYSTEM, user)
 
     return PostDischargeDigest(
-        participant=participant,
-        activity=activity,
-        start_score=start_score,
-        end_score=end_score,
+        stay_id=stay_id,
+        subject_ref=provenance["subject_ref"],
+        kit=kit.name,
         daily_buckets=buckets,
         narrative=narrative,
+        provenance={**provenance, "watermark": SYNTHETIC_WATERMARK},
     )
+
+
+def _channel_code(channel: str) -> str | None:
+    from services.contracts.observation import CHANNELS
+
+    ch = CHANNELS.get(channel)
+    return ch.code if ch else None

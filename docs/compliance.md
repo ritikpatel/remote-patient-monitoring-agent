@@ -1,8 +1,9 @@
 # Compliance mapping
 
 > This platform is validated on a 100-patient demo subset of MIMIC-IV. Clinical
-> narrative is LLM-generated from structured data. Wearable deterioration
-> signals are synthetically morphed from healthy-volunteer recordings. The
+> narrative is LLM-generated from structured data. Post-discharge signals are real
+> MIMIC physiology passed through a simulated home sensor layer, and the
+> post-discharge model is a transfer from ICU data with no post-discharge labels. The
 > engineering is real and the methodology is rigorous; the clinical
 > performance figures demonstrate pipeline validity and do not transfer to
 > clinical practice.

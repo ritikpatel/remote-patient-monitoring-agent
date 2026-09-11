@@ -35,7 +35,27 @@ class TfidfIndex:
             self._vectorizer.fit_transform([p.text for p in passages]) if passages else None
         )
 
-    def search(self, query: str, k: int = 5, source: str | None = None) -> list[SearchResult]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        source: str | None = None,
+        hadm_id: int | None = None,
+    ) -> list[SearchResult]:
+        """``hadm_id`` restricts note passages to ONE admission's own notes.
+
+        Added for the agent's ContextRetriever, which needs "what do this patient's
+        notes say" and not "what does some patient's note say". Without it the
+        top-k for a query like 'hypotension vasopressor' is dominated by whichever
+        admission's discharge summary happens to use those words most densely --
+        the agent was retrieving another patient's chart and summarising it under
+        the alerting patient's name.
+
+        Guideline passages carry no ``hadm_id`` and are deliberately NOT filtered
+        out by it: a care plan needs the general clinical convention alongside this
+        patient's specifics, and a filter that dropped every guideline would leave
+        the LLM with nothing to ground a recommendation in.
+        """
         if not self.passages:
             return []
         query_vec = self._vectorizer.transform([query])
@@ -43,4 +63,6 @@ class TfidfIndex:
         ranked = sorted(zip(self.passages, scores, strict=True), key=lambda t: t[1], reverse=True)
         if source is not None:
             ranked = [(p, s) for p, s in ranked if p.source == source]
+        if hadm_id is not None:
+            ranked = [(p, s) for p, s in ranked if p.hadm_id is None or p.hadm_id == hadm_id]
         return [SearchResult(p, float(s)) for p, s in ranked[:k] if s > 0]

@@ -52,13 +52,23 @@ from services.common.observability import instrument_metrics, instrument_tracing
 PAGE_WORTHY_SEVERITY = "high"
 
 
-def send_escalation_email(patient_ref: str, severity: str, message: str) -> dict:
+def send_escalation_email(
+    patient_ref: str, severity: str, message: str, assessment: dict | None = None
+) -> dict:
     """The concrete "page a human" step for a high-severity alert, using the
     guarded sender this project demonstrates live. Safe to leave wired in
     every environment: EMAIL_MODE defaults to dry_run, so this composes and
     returns without ever connecting to an SMTP server unless an operator has
-    explicitly opted in -- see services/common/email.py's four guards."""
-    content = email.compose(patient_ref, f"{severity.upper()} alert", message)
+    explicitly opted in -- see services/common/email.py's four guards.
+
+    `assessment` is agent-orchestrator's `/assess` output, forwarded by
+    alert-service on the same call that raised the alert. When present the body
+    carries the diagnosis, comorbidities, which threshold escalated, the learned
+    model's severity grade and the grounded care plan; when absent this composes
+    exactly the message it always did."""
+    content = email.compose(
+        patient_ref, f"{severity.upper()} alert", message, assessment=assessment
+    )
     return email.send(content).as_dict()
 
 
@@ -138,6 +148,10 @@ class NotifyRequest(BaseModel):
     message: str
     device_token: str | None = None
     timestamp: datetime | None = None
+    # agent-orchestrator's /assess payload, forwarded by alert-service. Optional
+    # throughout: every pre-existing caller (and any path where the agent could not
+    # be reached) simply omits it and gets the previous behaviour.
+    assessment: dict | None = None
 
 
 @app.post("/notify")
@@ -156,10 +170,22 @@ async def notify(req: NotifyRequest) -> dict:
     email_result = None
     sms_result = None
     if req.severity == PAGE_WORTHY_SEVERITY:
-        email_result = send_escalation_email(req.patient_ref, req.severity, req.message)
+        # Email carries the full care plan; SMS deliberately does not. A care plan is
+        # several hundred characters of clinical prose -- right for an inbox, wrong
+        # for a text that gets truncated mid-sentence. See services/common/email.py's
+        # compose() docstring.
+        email_result = send_escalation_email(
+            req.patient_ref, req.severity, req.message, assessment=req.assessment
+        )
         sms_result = send_escalation_sms(req.patient_ref, req.severity, req.message)
 
-    return {"channels": channels, "pushed": pushed, "email": email_result, "sms": sms_result}
+    return {
+        "channels": channels,
+        "pushed": pushed,
+        "email": email_result,
+        "sms": sms_result,
+        "assessment_attached": bool(req.assessment),
+    }
 
 
 if __name__ == "__main__":

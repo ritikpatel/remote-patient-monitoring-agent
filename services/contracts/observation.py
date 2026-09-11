@@ -9,7 +9,7 @@ projection of already-FHIR-shaped fields onto a FHIR resource, not a translation
 between two different data models.
 
 Three producers satisfy this contract: simulators/real_event_replay.py (the PRIMARY
-test input -- every channel the model trains on), simulators/wearable_replay.py
+test input -- every channel the model trains on), simulators/home_kit_stream.py
 (true-rate and morphed), and the Wear OS edge agent (edge/edge_agent/). All three
 import Observation and CHANNELS from here rather than redefining fields.
 

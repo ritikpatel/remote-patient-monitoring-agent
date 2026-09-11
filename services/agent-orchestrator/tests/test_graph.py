@@ -49,7 +49,22 @@ def known_high_tier_stay():
     return row
 
 
-def test_full_graph_runs_all_six_nodes_in_order(deps, known_high_tier_stay):
+# The graph's node sequence, in execution order. DiseaseContext and CarePlanner
+# joined section 10's original six when the platform became disease-aware -- see
+# graph.py's module docstring for why each sits where it does.
+EXPECTED_NODE_ORDER = [
+    "DiseaseContext",
+    "VitalsMonitor",
+    "LabInterpreter",
+    "RiskScorer",
+    "ContextRetriever",
+    "EscalationDecider",
+    "CarePlanner",
+    "Summarizer",
+]
+
+
+def test_full_graph_runs_every_node_in_order(deps, known_high_tier_stay):
     stay_id, hour = known_high_tier_stay
     graph = build_graph(deps)
     result = graph.invoke(
@@ -62,20 +77,17 @@ def test_full_graph_runs_all_six_nodes_in_order(deps, known_high_tier_stay):
     assert "context_passages" in result
     assert "escalate" in result
     assert "summary" in result
+    # Disease awareness: the graph now knows what the patient is being treated for,
+    # and every downstream node can see it.
+    assert "disease_context" in result
 
-    # six nodes, six audit rows, one per node -- constraint 3, proven not asserted.
-    assert len(result["audit_rows"]) == 6
+    # One audit row per node -- constraint 3, proven not asserted. Counted from
+    # EXPECTED_NODE_ORDER rather than a literal so adding a node updates one list.
+    assert len(result["audit_rows"]) == len(EXPECTED_NODE_ORDER)
 
     rows = deps.audit_log.all_rows()
     node_names = [r.actor.split(":")[1] for r in rows]
-    assert node_names == [
-        "VitalsMonitor",
-        "LabInterpreter",
-        "RiskScorer",
-        "ContextRetriever",
-        "EscalationDecider",
-        "Summarizer",
-    ]
+    assert node_names == EXPECTED_NODE_ORDER
 
 
 def test_audit_chain_is_intact_after_a_full_run(deps, known_high_tier_stay):
