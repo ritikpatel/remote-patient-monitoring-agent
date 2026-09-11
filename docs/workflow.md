@@ -18,6 +18,12 @@ itself to (`README.md`'s "What's real vs. what's honestly scoped"). See
 one composite event straight through to an alert, without the full component
 inventory.
 
+This page carries **two** diagrams. The first is the runtime path — an event
+arrives, a score comes back, an alert goes out. The second, further down, is the
+**offline pipeline** that builds the warehouse and the model the first one reads:
+where the data comes from, how the model is trained and evaluated, and which arms
+were measured and rejected on the way.
+
 ## The two things to understand before reading the diagram
 
 **1. `EscalationLoop` is one class with two entry points, and both run the
@@ -79,14 +85,14 @@ flowchart TD
     %% ============ INPUT LAYER ============
     subgraph INPUTS["① Event sources — all producers satisfy one Observation contract"]
         direction LR
-        ICU["real_event_replay.py\nICU monitor replay"]
-        WR["home_kit_stream.py\nreal deterioration, simulated device"]
-        WATCH["Wear OS watch\nBLE GATT peripheral"]
-        EDGE["edge_agent\nfeatures + SQLite outbox"]
-        STUDIO["event-studio (browser)\ncompose severity → event\n(local should_escalate preview)"]
+        ICU["real_event_replay.py<br/>ICU monitor replay"]
+        WR["home_kit_stream.py<br/>real deterioration, simulated device"]
+        WATCH["Wear OS watch<br/>BLE GATT peripheral"]
+        EDGE["edge_agent<br/>features + SQLite outbox"]
+        STUDIO["event-studio (browser)<br/>compose severity → event<br/>(local should_escalate preview)"]
         WATCH -->|BLE notify| EDGE
     end
-    OBS{{"Observation contract\npatient_ref · LOINC code · value · quality_flags"}}
+    OBS{{"Observation contract<br/>patient_ref · LOINC code · value · quality_flags"}}
     ICU --> OBS
     WR --> OBS
     EDGE --> OBS
@@ -94,96 +100,96 @@ flowchart TD
 
     %% ============ INGESTION ============
     subgraph INGEST["② Ingestion"]
-        GW["ingest-gateway :8000\nREST+MQTT · schema validation · API-key auth"]
+        GW["ingest-gateway :8000<br/>REST+MQTT · schema validation · API-key auth"]
         MQTTB[("EMQX broker")]
         KAFKA[("Kafka  raw.* topics")]
     end
-    OBS -->|"HTTPSink\nPOST /observations/batch"| GW
+    OBS -->|"HTTPSink<br/>POST /observations/batch"| GW
     EDGE -->|MqttPublisher| MQTTB
-    MQTTB -->|"mqtt_subscriber.py\n(MQTT_HOST)"| GW
+    MQTTB -->|"mqtt_subscriber.py<br/>(MQTT_HOST)"| GW
     GW -->|KafkaPublisher| KAFKA
 
     %% ============ ESCALATION CORE — one class, two entry points ============
     subgraph STREAM["③ EscalationLoop — one class, two entry points, always the same score→alert sequence"]
-        SP["stream-processor :8003\nKafkaConsumerThread\nrolling stats · trend slopes · HRV · event-rate norm (R4)"]
-        WIN[("windowed store\nlatest + rolling stats /channel")]
-        LOOP{{"EscalationLoop\non_observation() — per Kafka message, throttled 15 stream-min/patient\nrun_now() — one-shot, called directly, no throttle"}}
+        SP["stream-processor :8003<br/>KafkaConsumerThread<br/>rolling stats · trend slopes · HRV · event-rate norm (R4)"]
+        WIN[("windowed store<br/>latest + rolling stats /channel")]
+        LOOP{{"EscalationLoop<br/>on_observation() — per Kafka message, throttled 15 stream-min/patient<br/>run_now() — one-shot, called directly, no throttle"}}
         SP --> WIN --> LOOP
     end
     KAFKA --> SP
-    STUDIO ==>|"run_now(vitals) — realtime,\nbypasses Kafka"| LOOP
+    STUDIO ==>|"run_now(vitals) — realtime,<br/>bypasses Kafka"| LOOP
 
-    RE_LIVE["risk-engine :8001\nPOST /score/live\n(streamed vitals, no stay_id)"]
+    RE_LIVE["risk-engine :8001<br/>POST /score/live<br/>(streamed vitals, no stay_id)"]
     LOOP -->|"① vitals"| RE_LIVE
     RE_LIVE -.->|"② news2 + escalation_recommended"| LOOP
 
-    PRED{{"warehouse/news2.py — should_escalate()\none definition — also imported by event-studio's preview\n3 limbs: ICU tier=high (E5) · red non-GCS param (F1)\n· GCS falls ≥2pts/4h off sedation"}}
+    PRED{{"warehouse/news2.py — should_escalate()<br/>one definition — also imported by event-studio's preview<br/>3 limbs: ICU tier=high (E5) · red non-GCS param (F1)<br/>· GCS falls ≥2pts/4h off sedation"}}
     RE_LIVE -.->|imports| PRED
 
     %% ============ ALERTING — alert-service is the ONE caller of notify ============
     subgraph ALERTOUT["④ Alerting — alert-service is the ONLY caller of notification-gateway on a new alert"]
-        AS["alert-service :8005\nraise · dedupe (4h clock, R6)\nsuppress · escalate · ack"]
+        AS["alert-service :8005<br/>raise · dedupe (4h clock, R6)<br/>suppress · escalate · ack"]
         ASDB[("SQLite AlertStore")]
-        NG["notification-gateway :8006\nWebSocket · FCM push · guarded email + SMS\n(services/common/{email,sms}.py, high severity)"]
+        NG["notification-gateway :8006<br/>WebSocket · FCM push · guarded email + SMS<br/>(services/common/{email,sms}.py, high severity)"]
         AS -->|"internally, on a new alert"| NG
         AS --> ASDB
     end
     LOOP -->|"POST /alerts"| AS
-    AS -.->|"embedded in response\n(F7: fixed a double-notify bug)"| LOOP
-    EMAILSVC(("guarded SMTP sender\ndry-run unless EMAIL_MODE=live\nforces [SYNTHETIC DRILL]\nlive-demonstrated: free SMTP"))
+    AS -.->|"embedded in response<br/>(F7: fixed a double-notify bug)"| LOOP
+    EMAILSVC(("guarded SMTP sender<br/>dry-run unless EMAIL_MODE=live<br/>forces [SYNTHETIC DRILL]<br/>live-demonstrated: free SMTP"))
     INBOX(("clinician's inbox"))
-    SMS(("guarded Twilio sender\ndry-run unless SMS_MODE=live\nforces [SYNTHETIC DRILL]\nwired, configurable: needs Twilio"))
+    SMS(("guarded Twilio sender<br/>dry-run unless SMS_MODE=live<br/>forces [SYNTHETIC DRILL]<br/>wired, configurable: needs Twilio"))
     PHONE(("clinician's phone"))
     NG -->|"severity == high"| EMAILSVC -.-> INBOX
     NG -->|"severity == high"| SMS -.-> PHONE
 
     %% ============ SCORING CORE ============
     subgraph SCORE["⑤ Scoring core — risk-engine :8001, warehouse-backed"]
-        RE_DET["GET /score/{stay}/{hour}\nward+ICU NEWS2 · SOFA"]
-        RE_ML["POST /score/ml/{stay}/{hour}\nLightGBM 0.493 AUPRC + SHAP"]
+        RE_DET["GET /score/{stay}/{hour}<br/>ward+ICU NEWS2 · SOFA"]
+        RE_ML["POST /score/ml/{stay}/{hour}<br/>LightGBM 0.493 AUPRC + SHAP"]
     end
     RE_DET -.->|imports| PRED
 
     %% ============ ON-DEMAND AGENTIC PATH ============
     subgraph AGENT["⑥ On-demand agentic path — agent-orchestrator :8008 (LangGraph, per patient not per observation)"]
         direction LR
-        A1["VitalsMonitor\nreads hourly_grid"]
-        A2["LabInterpreter\nreads abnormal labs"]
-        A3["RiskScorer\nrelays risk-engine\nVERBATIM"]
-        A4["ContextRetriever\nqueries rag-service"]
-        A5["EscalationDecider\nPOLICY FIRST;\nLLM asked after"]
-        A6["Summarizer\nLLM from state only"]
+        A1["VitalsMonitor<br/>reads hourly_grid"]
+        A2["LabInterpreter<br/>reads abnormal labs"]
+        A3["RiskScorer<br/>relays risk-engine<br/>VERBATIM"]
+        A4["ContextRetriever<br/>queries rag-service"]
+        A5["EscalationDecider<br/>POLICY FIRST;<br/>LLM asked after"]
+        A6["Summarizer<br/>LLM from state only"]
         A1 --> A2 --> A3 --> A4 --> A5 --> A6
     end
-    STUDIO ==>|"POST /run — real demo\npatient only, GET /patients"| A1
+    STUDIO ==>|"POST /run — real demo<br/>patient only, GET /patients"| A1
     A3 -->|"GET /score/{stay}/{hour}"| RE_DET
     A5 -.->|"imports, same fn as RE_LIVE"| PRED
 
     subgraph KNOW["Knowledge + LLM"]
-        RAG["rag-service :8004\nTF-IDF (not yet pgvector)"]
-        RAGCORPUS[("notes_synth notes\n+ guideline corpus")]
-        LLM(("LLM backend\nGroq gpt-oss-120b (used)\nclaude-sonnet-5 (target)"))
+        RAG["rag-service :8004<br/>TF-IDF (not yet pgvector)"]
+        RAGCORPUS[("notes_synth notes<br/>+ guideline corpus")]
+        LLM(("LLM backend<br/>Groq gpt-oss-120b (used)<br/>claude-sonnet-5 (target)"))
         RAGCORPUS --> RAG
     end
     A4 -->|"GET /search?q&k=3"| RAG
-    STUDIO ==>|"GET /search — direct,\nonly if escalated"| RAG
-    A5 -.->|"advisory only —\nnever overrides"| LLM
+    STUDIO ==>|"GET /search — direct,<br/>only if escalated"| RAG
+    A5 -.->|"advisory only —<br/>never overrides"| LLM
     A6 --> LLM
 
-    WH[("DuckDB warehouse\nhourly_grid · news2 · labevents")]
+    WH[("DuckDB warehouse<br/>hourly_grid · news2 · labevents")]
     A1 -.->|reads| WH
     A2 -.->|reads| WH
     RE_DET -.->|reads| WH
     RE_ML -.->|reads| WH
 
-    AUDIT[("hash-chained audit log\nSQLite/Postgres — tamper-evident")]
+    AUDIT[("hash-chained audit log<br/>SQLite/Postgres — tamper-evident")]
     A1 & A2 & A3 & A4 & A5 -.-> AUDIT
-    A6 -.->|"{input_hash, tool_calls, output,\nmodel_id, tokens, latency_ms}"| AUDIT
+    A6 -.->|"{input_hash, tool_calls, output,<br/>model_id, tokens, latency_ms}"| AUDIT
 
     %% ============ CONSUMERS ============
     subgraph OUT["⑦ Consumers"]
-        CAPI["clinician-api :8007\nBFF · SMART-on-FHIR JWT"]
-        UI["Clinician dashboard (React)\nward · patient · alert inbox"]
+        CAPI["clinician-api :8007<br/>BFF · SMART-on-FHIR JWT"]
+        UI["Clinician dashboard (React)<br/>ward · patient · alert inbox"]
     end
     RE_DET -->|"/risk"| CAPI
     RE_ML -->|"/risk/.../ml"| CAPI
@@ -196,17 +202,17 @@ flowchart TD
 
     %% ============ FHIR + REPORTS ============
     subgraph EXPORT["⑧ Clinical export"]
-        FHIRMAP["fhir-mapper :8002\n11 FHIR R4B mappers"]
+        FHIRMAP["fhir-mapper :8002<br/>11 FHIR R4B mappers"]
         HAPI[("HAPI FHIR server")]
-        REPORTS["reports/\nhandover · daily summary · digest"]
+        REPORTS["reports/<br/>handover · daily summary · digest"]
         PDF[/"PDF"/]
     end
     FHIRMAP -.->|reads| WH
-    FHIRMAP -->|"transaction bundle\n(F2 fixed)"| HAPI
+    FHIRMAP -->|"transaction bundle<br/>(F2 fixed)"| HAPI
     REPORTS -.->|reads| WH
-    REPORTS -->|"same discipline\nas Summarizer"| LLM
+    REPORTS -->|"same discipline<br/>as Summarizer"| LLM
     REPORTS --> PDF
-    REPORTS -->|"daily-summary only,\nmapper as a library"| HAPI
+    REPORTS -->|"daily-summary only,<br/>mapper as a library"| HAPI
 
     %% ============ STYLES ============
     classDef input fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
@@ -254,6 +260,127 @@ needs a funded account this environment doesn't have). Grey cylinders are
 stores (Kafka, the warehouse, the audit log, the corpus) — nothing computes
 inside them.
 
+## The offline pipeline that builds what the runtime reads
+
+The diagram above is the *runtime* path: an event arrives, a score comes back,
+an alert goes out. Two of its nodes — the DuckDB warehouse and the LightGBM
+model inside `risk-engine` — are not built at runtime at all. They come from a
+separate, entirely offline pipeline, and a reader who only sees the diagram
+above has no way to tell where they came from or what was rejected on the way.
+
+```mermaid
+%%{init: {"flowchart": {"rankSpacing": 50, "nodeSpacing": 26, "curve": "monotoneY"}}}%%
+flowchart TD
+    %% ============ SOURCE ============
+    subgraph SRC["Ⓐ Source — the constraint everything else inherits"]
+        DEMO[("MIMIC-IV demo<br/>100 patients · 140 stays<br/>open licence, no credentialing")]
+        FULL[["full MIMIC-IV 3.1<br/>credentialed · NOT downloaded<br/>warehouse/fetch_mimic4.py checks for it"]]
+    end
+
+    %% ============ WAREHOUSE ============
+    subgraph WH["Ⓑ Warehouse — warehouse/"]
+        BUILD["build_duckdb.py<br/>load raw tables"]
+        CONCEPTS["run_concepts.py<br/>mimic-code derived concepts"]
+        GRID["hourly_grid.py<br/>one row per stay-hour<br/>carry-forward + imputation flags"]
+        DISEASE["disease.py<br/>dx_chapter · 17 Charlson flags<br/>-> capstone.disease_context"]
+        NEWS["news2.py<br/>cohort cut-points + per-chapter<br/>-> should_escalate()"]
+        BUILD --> CONCEPTS --> GRID
+        CONCEPTS --> DISEASE --> NEWS
+    end
+    DEMO --> BUILD
+    FULL -.->|"would replace, same pipeline"| BUILD
+
+    DB[("DuckDB warehouse<br/>hourly_grid · news2 · labs<br/>disease_context")]
+    GRID --> DB
+    NEWS --> DB
+    DISEASE --> DB
+
+    %% ============ FEATURES + LABELS ============
+    subgraph FEAT["Ⓒ Features and labels — ml/features/"]
+        ENG["engineer.py<br/>85 features · 36 rolling std/slope<br/>disease set = chronic"]
+        LAB["labels.py<br/>composite event · R1 censoring<br/>label_6h / label_12h"]
+    end
+    DB --> ENG
+    DB --> LAB
+
+    %% ============ TRAINING ============
+    subgraph TRAIN["Ⓓ Training — ml/models/, subject-grouped CV throughout (F6)"]
+        SPLIT["splits.py<br/>repeated grouped stratified CV"]
+        MODELS["baselines · logistic · gbm · gru<br/>NEWS2 and SOFA as reference"]
+        PROMOTE["serving.py<br/>promoted artefact + manifest<br/>severity cut-points from OOF"]
+        SPLIT --> MODELS --> PROMOTE
+    end
+    ENG --> SPLIT
+    LAB --> SPLIT
+
+    %% ============ EVALUATION ============
+    subgraph EVAL["Ⓔ Evaluation — ml/evaluation/, every arm scored on real held-out patients"]
+        RUNALL["run_all.py<br/>primary + secondary horizons<br/>fairness audit · SHAP"]
+        RELY["reliability.py<br/>what narrows the interval:<br/>~725 positive subjects needed, 49 held"]
+        DROP["channel_dropout.py + home_kit_transfer.py<br/>what a home kit retains"]
+        LEAK["disease_leakage.py<br/>dx_chapter scores at chance — no leak"]
+    end
+    PROMOTE --> RUNALL
+    RUNALL --> RELY
+    ENG --> DROP
+    ENG --> LEAK
+
+    %% ============ SYNTHETIC — the arm that was rejected ============
+    subgraph SYN["Ⓕ Synthetic data — ml/synthetic/ · measured, then rejected"]
+        CEIL["evaluation/synthetic_ceiling.py<br/>perfect resampler: no gain<br/>(could not reach mid-fidelity)"]
+        WGAN["emr_wgan.py<br/>WGAN-GP · BN generator / LN critic<br/>conditional on the label"]
+        PAT["patients.py<br/>whole patients: AR(1) trajectories<br/>derived features RECOMPUTED"]
+        QUAL{{"evaluate.py — the paper's battery<br/>DWD 1.44 (paper 0.52-1.56)<br/>TSTR 0.800 vs TRTR 0.827"}}
+        PRIV{{"privacy_control.py<br/>membership F1 0.84<br/>chance 0.51 · real 1.0"}}
+        WGAN --> QUAL
+        PAT --> QUAL
+        WGAN --> PRIV
+    end
+    RELY -->|"the only lever is<br/>more patients"| CEIL
+    CEIL -->|"admitted gap:<br/>no mid-fidelity generator"| WGAN
+    ENG --> WGAN
+    QUAL -.->|"augmented: -0.0006 AUPRC, 10/20<br/>patients: 39 -> 539 subjects, -0.0337"| VERDICT
+    VERDICT{{"REJECTED for training.<br/>Not de-identified either —<br/>must not leave the project"}}
+    PRIV -.-> VERDICT
+
+    %% ============ WHAT THE RUNTIME CONSUMES ============
+    RT(("runtime: risk-engine,<br/>agent-orchestrator, reports<br/>— the diagram above"))
+    DB ==>|read at request time| RT
+    PROMOTE ==>|"loaded artefact"| RT
+    NEWS ==>|"should_escalate() imported"| RT
+    VERDICT -. "never reaches" .-> RT
+
+    classDef src fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+    classDef wh fill:#e5e7eb,stroke:#6b7280,color:#111827;
+    classDef feat fill:#fef9c3,stroke:#ca8a04,color:#713f12;
+    classDef train fill:#dcfce7,stroke:#16a34a,color:#14532d;
+    classDef evalc fill:#ede9fe,stroke:#7c3aed,color:#4c1d95;
+    classDef syn fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    classDef rt fill:#ccfbf1,stroke:#0d9488,color:#134e4a;
+    class DEMO,FULL src;
+    class BUILD,CONCEPTS,GRID,DISEASE,NEWS,DB wh;
+    class ENG,LAB feat;
+    class SPLIT,MODELS,PROMOTE train;
+    class RUNALL,RELY,DROP,LEAK evalc;
+    class CEIL,WGAN,PAT,QUAL,PRIV,VERDICT syn;
+    class RT rt;
+```
+
+**Why the rejected arm is on the diagram.** Ⓕ produces nothing the runtime
+consumes, and a diagram of what the system *does* would leave it out. It is here
+because the question it answers — can synthetic patients substitute for the ones
+this cohort does not have — is the first thing a reader asks on seeing Ⓐ, and the
+answer is measured rather than assumed. The dashed edge into the runtime is
+crossed out on purpose: a synthetic row never enters a training or evaluation set
+whose metrics are reported as performance, and the privacy result means the
+cohort is not shareable either.
+
+**The one edge that would change everything.** `full MIMIC-IV` in Ⓐ is dashed
+because it is not downloaded — it needs PhysioNet credentialing and a signed data
+use agreement. Every "wide confidence interval" caveat in this repo traces back
+to that single dashed edge, and `warehouse/fetch_mimic4.py` exists to check the
+landing zone without ever handling a credential.
+
 ## Recently closed
 
 - **MQTT ingress: publish always worked; the subscriber side didn't exist —
@@ -299,5 +426,7 @@ inside them.
 | ⑦ Consumers | [`ui/README.md`](../ui/README.md) |
 | ⑧ Clinical export | [`reports/README.md`](../reports/README.md), `infra/compose/README.md`'s HAPI FHIR section |
 | Scoring numbers | [`ml/README.md`](../ml/README.md), [`ml/evaluation/report.md`](../ml/evaluation/report.md) |
+| Ⓐ-Ⓔ Offline pipeline | [`warehouse/README.md`](../warehouse/README.md), [`ml/README.md`](../ml/README.md), [`ml/evaluation/reliability_report.md`](../ml/evaluation/reliability_report.md) |
+| Ⓕ Synthetic data, and why it was rejected | [`ml/synthetic/README.md`](../ml/synthetic/README.md), [`ml/synthetic/report.md`](../ml/synthetic/report.md), [`ml/evaluation/synthetic_ceiling_report.md`](../ml/evaluation/synthetic_ceiling_report.md) |
 | Post-discharge transfer bound | [`ml/evaluation/home_kit_transfer_report.md`](../ml/evaluation/home_kit_transfer_report.md) |
 | The double-notify bug (F7) | `services/stream-processor/escalation.py` and `services/alert-service/app.py` module docstrings, `VALIDATION_REPORT.md`'s scope note |

@@ -370,6 +370,53 @@ that one generic model beats maintaining a second wrist-specific one. See
 [`evaluation/channel_dropout_report.md`](evaluation/channel_dropout_report.md),
 including why these are upper bounds.
 
+## Synthetic patients, and what they are worth (`ml/synthetic/`)
+
+```bash
+python ml/synthetic/run_tutorial.py      # quality battery + row-level augmentation, ~20 min
+python ml/synthetic/run_patients.py      # whole class-balanced patients, ~45 min
+python ml/synthetic/report.py            # rebuild the prose from the CSVs
+```
+
+[`reliability.py`](evaluation/reliability.py) concludes that the only lever left
+on this model's interval is more patients, and full MIMIC-IV is credentialed
+access. So the obvious question is whether a generative model can manufacture
+the difference. [`evaluation/synthetic_ceiling.py`](evaluation/synthetic_ceiling.py)
+answered it with a resampling generator and found nothing — but admitted a hole
+in its own text: perturbing channels independently could only reach 100% or 0%
+fidelity, never the middle, so "what if a *real* generator hit 90%?" stayed
+hypothetical.
+
+`ml/synthetic/` closes that hole by implementing the EMR-WGAN tutorial (Yan et
+al., JMIR AI 2024;3:e52615) properly, and the implementation is faithful enough
+for the answer to count: dimension-wise distance **1.44** against the 0.52–1.56
+the paper reports for its own five runs on 181,294 patients, column-wise
+correlation ~5.0 against their 5.0–6.5, and a model trained purely on synthetic
+rows scoring AUROC **0.800** against the real model's 0.827 on the same held-out
+patients.
+
+It still buys nothing. Across 20 paired comparisons no augmented arm beats the
+real-only baseline — best of six is **−0.0006 AUPRC at 10/20 wins** — and the
+largest multiplier is the worst arm. Generating whole *patients*, class-balanced,
+removes the fair objection that patient-hours cannot raise the positive-**subject**
+count: it takes that count from 39 per fold to **539**, fourteen times over, and
+AUPRC moves **−0.0337**. Fidelity was never the binding constraint.
+
+Two findings the paper does not lead you to expect:
+
+- **The paradigm it demonstrates breaks on a 4% event rate.** Nonconditional
+  training collapses the deterioration label to 0.0041 early on — too few
+  positives to fit a classifier. Conditional training holds the rate exactly.
+- **Privacy runs the other way.** Membership-inference F1 reaches **0.84**
+  against a 0.51 chance floor and 1.0 for publishing the real records, rising
+  with training length. [`privacy_control.py`](synthetic/privacy_control.py)
+  rules out the confound: refitting on the held-out group swings the verdict on
+  identical targets by +0.66. **The synthetic cohort is not de-identified and
+  must not leave the project** — the one use the method exists for.
+
+Full write-up, including the paper's use-case weight profiles:
+[`synthetic/report.md`](synthetic/report.md).
+
 ## Secondary, underpowered outcomes (`ml/evaluation/secondary_whole_stay.py`)
 
 ICU mortality and 30-day readmission, exactly as the plan requires: reported
