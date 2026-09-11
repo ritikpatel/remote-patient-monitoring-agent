@@ -28,6 +28,15 @@ just "things that seemed predictive":
   right now," not "in the ICU" (which every row already is).
 * **Static demographics** -- age, gender, first ICU care unit -- from
   ``mimiciv_derived.icustay_detail`` / ``mimiciv_icu.icustays``.
+* **Disease context** -- Charlson chronic-comorbidity burden and the primary
+  diagnosis's ICD chapter, from ``capstone.disease_context``
+  (``warehouse/disease.py``). This closed a real gap: before it, the model's only
+  case-mix signal was ``first_careunit``, which ranked *second* by mean |SHAP| and
+  was silently acting as a diagnosis proxy. The two disease sources sit on opposite
+  sides of a leakage line -- Charlson describes pre-existing chronic burden, ICD
+  codes are assigned by billing coders after discharge -- so they are selectable
+  separately via ``DISEASE_FEATURE_SETS`` and measured against each other in
+  ``ml/evaluation/disease_leakage.py``.
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 from services.common.testing import load_module
+from warehouse.disease import CHARLSON_FLAGS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _windowing = load_module(
@@ -164,6 +174,24 @@ def add_lab_order_intensity(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
     return out
 
 
+def add_disease_features(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Joins ``capstone.disease_context`` -- what this patient is being treated for.
+
+    Until this existed the model's only case-mix signal was ``first_careunit``, which
+    ranked *second* by mean |SHAP| and was acting as an unexamined disease proxy
+    ("admitted to CVICU" ~ "cardiac problem"). Making the disease axis explicit is
+    what lets ``ml/evaluation/disease_leakage.py`` measure it.
+
+    Every column this adds is patient-constant, and two of them are on opposite sides
+    of a leakage line -- see ``warehouse/disease.py``'s module docstring and
+    ``DISEASE_FEATURE_SETS`` below. This function adds all of them to the frame; which
+    ones reach a model is ``feature_matrix_for_training``'s decision, not this one's.
+    """
+    cols = ", ".join(["stay_id", "dx_chapter", *CHARLSON_FLAGS, "charlson_comorbidity_index"])
+    disease = conn.execute(f"select {cols} from capstone.disease_context").fetchdf()
+    return grid.merge(disease, on="stay_id", how="left")
+
+
 def add_static_features(grid: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     # subject_id is carried for grouping, not for modelling: it is the unit CV
     # must split on (ml/models/splits.py), and it is never added to the feature
@@ -201,6 +229,88 @@ FEATURE_COLUMNS_BASE = [
 ]
 
 
+# --- Disease awareness ---------------------------------------------------------
+# Four nested feature sets, because "make it disease-aware" has a leakage question
+# buried in it that only a measurement can settle (ml/evaluation/disease_leakage.py).
+#
+# MIMIC's ICD codes are assigned by billing coders AFTER discharge. They describe what
+# the admission turned out to be about -- which is not what a bedside model knows at
+# hour 3, and for this project's composite label (death / vasopressor start / invasive
+# ventilation start / ICU bounce-back) some codes describe the outcome itself. "Acute
+# respiratory failure with hypoxia" as a primary diagnosis sits very close to the
+# ventilation component of the label.
+#
+# Charlson's flags do not have that problem by construction: the index exists to score
+# *pre-existing chronic* burden, so it describes the patient who walked in. That is the
+# split these sets encode -- "chronic" is defensible at the bedside, "coded" needs the
+# leakage study before anyone believes a number produced with it.
+#
+DISEASE_FEATURE_SETS: dict[str, list[str]] = {
+    "none": [],
+    "chronic_index_only": ["charlson_comorbidity_index"],
+    "chronic": [*CHARLSON_FLAGS, "charlson_comorbidity_index"],
+    "coded_only": ["dx_chapter"],
+    "all": [*CHARLSON_FLAGS, "charlson_comorbidity_index", "dx_chapter"],
+}
+
+# What the study actually found (20 repeats x 5 folds, horizon 6h, identical folds):
+#
+#   arm                 mean AUPRC   delta    paired wins vs `none`   mean AUROC
+#   none                   0.5018        --                      --      0.8198
+#   chronic_index_only     0.4936   -0.0083                  3 / 20      0.8429
+#   chronic                0.4879   -0.0139                  4 / 20      0.8448
+#   coded_only             0.4907   -0.0111                  2 / 20      0.8042
+#   all                    0.4757   -0.0262                  2 / 20      0.8273
+#
+# Two findings, and neither is the one you would guess.
+#
+# **There is no detectable leak.** `dx_chapter` on its own scores AUPRC 0.0392
+# against a base rate of 0.0403 -- at, in fact fractionally below, chance. The
+# discharge-coded diagnosis carries essentially no information about *which hour* a
+# patient deteriorates, which is the question this model is asked. Probe 2 agrees:
+# no chapter spikes on the component matching its own organ system (Respiratory x
+# ventilation is 1.30, unremarkable next to Infectious x readmission at 3.46, which
+# is case mix, not coding). The leakage worry that motivated the whole two-set split
+# turned out to be unfounded *for this task* -- worth stating plainly, because it was
+# a real risk that had to be checked rather than assumed away.
+#
+# **Disease features do not improve the point estimate.** No arm beats disease-blind;
+# the best wins 4 of 20 paired repeats. This is the same lesson `feature_pruning.py`
+# already drew -- 49 positive subjects will not support more columns -- and it is
+# unsurprising that 18 patient-constant columns lose. Note the split between metrics,
+# though: AUROC rises consistently (+0.025 with `chronic`) while AUPRC falls. Better
+# ranking overall, slightly worse ranking at the top of the list where the positives
+# are. AUPRC is the metric this project judges on, at a 4% base rate, so AUPRC wins
+# the argument.
+#
+# **Why the default is `chronic` anyway.** The -0.0139 delta is about 5% of the width
+# of AUPRC's own bootstrap CI on this cohort (0.3763-0.6319), i.e. indistinguishable
+# from noise, and `chronic` is the arm the leakage probes clear unambiguously. Set
+# against that: the platform is disease-aware end to end now -- per-chapter NEWS2
+# cut-points (warehouse/news2.py), disease-targeted retrieval and the care-plan node
+# (services/agent-orchestrator/nodes.py), and the diagnosis on the escalation email --
+# and a model that alone remained blind to the diagnosis would be the odd component
+# out, explaining its scores in terms no other part of the chain shares.
+#
+# That is a judgement, not a measurement, and it is reversible in one line: set this
+# to "none" to ship the disease-blind model with the best AUPRC point estimate. The
+# rest of the disease-aware chain does not depend on this constant.
+DEFAULT_DISEASE_FEATURES = "chronic"
+
+# The only disease column that is categorical rather than numeric; gbm.py needs it by
+# name, and importing it from here keeps one definition rather than two lists to sync.
+DISEASE_CATEGORICAL_COLUMNS = ["dx_chapter"]
+
+
+def disease_feature_columns(feature_set: str = DEFAULT_DISEASE_FEATURES) -> list[str]:
+    if feature_set not in DISEASE_FEATURE_SETS:
+        raise ValueError(
+            f"unknown disease feature set {feature_set!r} -- "
+            f"expected one of {sorted(DISEASE_FEATURE_SETS)}"
+        )
+    return list(DISEASE_FEATURE_SETS[feature_set])
+
+
 def rolling_feature_columns(
     windows: tuple[int, ...] = ROLLING_WINDOWS_H,
     stats: tuple[str, ...] = ROLLING_STATS,
@@ -222,6 +332,7 @@ def build_feature_frame(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     grid = add_severity_scores(grid, conn)
     grid = add_arterial_line_feature(grid, conn)
     grid = add_lab_order_intensity(grid, conn)
+    grid = add_disease_features(grid, conn)
     grid = add_static_features(grid, conn)
     return grid
 
@@ -232,6 +343,7 @@ def feature_matrix_for_training(
     label_col: str,
     include_demographics: bool = True,
     include_severity_scores: bool = False,
+    disease_features: str = DEFAULT_DISEASE_FEATURES,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Inner-join the full feature frame to the at-risk labelled rows, and
     return (X, y, groups) ready for ``models.splits``. ``groups`` is
@@ -292,6 +404,7 @@ def feature_matrix_for_training(
     )
 
     cols = list(FEATURE_COLUMNS_BASE) + rolling_feature_columns()
+    cols = cols + disease_feature_columns(disease_features)
     if include_severity_scores:
         cols = cols + list(SEVERITY_SCORE_COLUMNS)
 

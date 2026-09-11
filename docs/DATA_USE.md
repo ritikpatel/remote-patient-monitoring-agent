@@ -10,7 +10,6 @@ for why: demo data only, clinical narrative synthesised).
 | Dataset | Version | Local path | License | Terms |
 |---|---|---|---|---|
 | MIMIC-IV Clinical Database Demo | 2.2 | `mimic-iv-clinical-database-demo-2.2/` | [Open Database License (ODbL) v1.0](https://physionet.org/content/mimic-iv-demo/view-license/2.2/) | Free to share, modify, and use with attribution; share-alike for derivative databases |
-| Wearable Device Dataset from Induced Stress and Structured Exercise Sessions | 1.0.1 | `wearable-device-dataset-from-induced-stress-and-structured-exercise-sessions-1.0.1/` | [Open Data Commons Attribution License (ODC-By) v1.0](https://physionet.org/content/wearable-device-dataset/view-license/1.0.1/) | Free to share, modify, and use with attribution; no share-alike requirement |
 
 Full license text is vendored alongside each dataset (`LICENSE.txt` in each dataset
 folder) and is authoritative over this summary.
@@ -29,10 +28,15 @@ folder) and is authoritative over this summary.
   records with any external identifying data.
 - **Demo scope is a stated limitation, not a workaround.** 100 MIMIC-IV patients, 20 ICU deaths, 53 readmissions (E6 in `PROJECT_PLAN.md`). Every
   report carries the honest-reporting statement (§17 of `PROJECT_PLAN.md`).
-- **The wearable dataset has no link to the ICU cohort** (healthy volunteers, median
-  age ~21 vs ICU median 63 — E10). It is used only as a transport/DSP testbed and for
-  documented, watermarked signal morphing (R7) — never presented as measured patient
-  data.
+- **The wearable dataset has been removed from the project.** It was healthy
+  volunteers (median age ~21 vs ICU median 63) with zero deterioration events and no
+  link to the clinical cohort — finding **E10 retired**. The local copy was deleted;
+  it remains publicly available from PhysioNet if it is ever needed again.
+- **The post-discharge arm streams real MIMIC physiology through a simulated home
+  sensor layer** (`simulators/home_kit_stream.py`). The patient and their vitals are
+  real de-identified records; device cadence, measurement noise, non-wear gaps and all
+  within-hour detail are simulated and watermarked (R7) — never presented as measured
+  home-device data.
 
 ## Rule: no raw data enters git
 
@@ -44,7 +48,6 @@ given machine happens to keep the datasets. Anyone cloning this repository must
 download the three demo datasets from PhysioNet independently:
 
 - https://physionet.org/content/mimic-iv-demo/2.2/
-- https://physionet.org/content/wearable-device-dataset/1.0.1/
 
 Derived artefacts that are small, non-identifying, and needed for reproducibility
 (e.g. `eda_outputs/*.csv`, figures) may be tracked via DVC or git as appropriate —

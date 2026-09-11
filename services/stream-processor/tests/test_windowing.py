@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -14,14 +13,6 @@ from windowing import (  # noqa: E402
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-WEARABLE_S01_IBI = (
-    REPO_ROOT
-    / "wearable-device-dataset-from-induced-stress-and-structured-exercise-sessions-1.0.1"
-    / "Wearable_Dataset"
-    / "STRESS"
-    / "S01"
-    / "IBI.csv"
-)
 ARRIVAL_MODELS = REPO_ROOT / "simulators" / "arrival_models.json"
 
 
@@ -56,13 +47,24 @@ def test_hrv_rmssd_needs_at_least_two_values():
     assert hrv_rmssd([]) == 0.0
 
 
-@pytest.mark.skipif(not WEARABLE_S01_IBI.exists(), reason="wearable dataset not found")
-def test_hrv_rmssd_on_a_real_wearable_recording():
-    df = pd.read_csv(WEARABLE_S01_IBI, skiprows=1, header=None, names=["offset_s", "ibi_s"])
-    rmssd = hrv_rmssd(df.ibi_s.tolist())
-    # a real human RMSSD is bounded well within these limits; this is not a tight
-    # clinical assertion, just a sanity check that real data produces a real number
-    assert 0 < rmssd < 500
+def test_hrv_rmssd_matches_the_hand_computed_value():
+    """Pins the metric's definition against arithmetic that can be checked by eye.
+
+    This replaces a test that read a real IBI recording out of the PhysioNet
+    volunteer wearable dataset and asserted only `0 < rmssd < 500`. That dataset has
+    been removed from the project, and the assertion it supported was weak enough
+    that a unit error would have passed it. IBI [0.80, 0.85, 0.80, 0.90] s gives
+    successive differences of [50, -50, 100] ms, mean square 5000, so RMSSD is
+    sqrt(5000) = 70.71 ms -- which also fixes the seconds-to-milliseconds conversion
+    that the range check could not see.
+    """
+    assert hrv_rmssd([0.80, 0.85, 0.80, 0.90]) == pytest.approx(70.7106781, rel=1e-6)
+
+
+def test_hrv_rmssd_is_reported_in_milliseconds_not_seconds():
+    """The unit is the easiest thing to get wrong here and the hardest to notice: a
+    plausible-looking 0.07 would flow all the way to a clinician's digest."""
+    assert hrv_rmssd([1.0, 1.1]) == pytest.approx(100.0)
 
 
 @pytest.mark.skipif(

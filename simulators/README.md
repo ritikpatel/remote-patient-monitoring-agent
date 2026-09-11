@@ -25,48 +25,55 @@ within each hour by the fitted ICU-monitoring arrival model (phase-locked per st
 not "on the hour"). `--sink jsonl --out FILE` writes newline-delimited Observations
 instead of printing them; `--no-sleep` emits as fast as possible.
 
-## Wearable replay
+## Home-kit stream (post-discharge arm)
 
 ```bash
-python simulators/wearable_replay.py --list
-python simulators/wearable_replay.py --activity STRESS --participant S01 --duration-s 30
+python simulators/home_kit_stream.py --list-candidates
+python simulators/home_kit_stream.py --stay-id 30955999 --kit full_home
+python simulators/home_kit_stream.py --stay-id 30955999 --kit watch_only --sink http --no-sleep
 ```
 
-True-rate Empatica E4 replay (BVP 64 Hz, ACC 32 Hz, EDA/TEMP 4 Hz, HR 1 Hz), honouring
-every fault documented in `data_constraints.txt`: `f07` (BVP/TEMP invalid),
-`S02` (duplicated tail), and the three Bluetooth-drop split sessions (`f14_a/b`,
-`S11_a/b`, `S16_a/b`), auto-detected and replayed as one continuous session.
-`--list` shows every available session with `[SPLIT]`/`[FAULT FIXTURE]` tags.
+**Replaces the retired `wearable_replay.py` + `morphing.py` pair, and inverts what is
+synthetic.** Those took a healthy volunteer's real Empatica recording and *synthesised
+a deterioration onto it* — invented physiology, real sensor. The PhysioNet volunteer
+dataset behind them has been removed from the project entirely: median age ~21, **zero
+deterioration events**, no link to the clinical cohort, so it could never contain the
+outcome this platform predicts (finding **E10 retired**).
 
-## Morphing
+This module goes the other way. The **physiology is real** — a MIMIC ICU patient who
+genuinely deteriorated, with their genuinely recorded vitals, at the hours they were
+genuinely recorded. Only the **sensor layer** is simulated:
 
-```bash
-python simulators/morphing.py --activity STRESS --participant S01 \
-    --duration-s 60 --start-score 0 --end-score 8
-```
+| Part | Real or simulated |
+|---|---|
+| Patient, diagnosis, deterioration, hourly vital values | **real** MIMIC records |
+| Which channels exist at all | **real constraint** — no home sensor for core temp, GCS, FiO2 |
+| Per-channel cadence (wrist 1/min, CGM 5/min, cuff 2/day) | simulated |
+| Measurement noise (PPG ±5 bpm, SpO2 ±3%, cuff ±8 mmHg) | simulated, assumed from device literature |
+| Non-wear gaps (block-structured, not per-sample) | simulated |
+| Within-hour detail between hourly anchors | **simulated** — MIMIC holds one value per hour |
 
-Conditions a real wearable segment on a target NEWS2-proxy trajectory (HR baseline
-shift + HRV suppression on the real recording; SpO2 fully fabricated, since Empatica
-doesn't measure it). Every output Observation carries `quality_flags=[synthetic]`
-and `device_id="morph-sim"` -- this is a testbed for the alerting pathway, not a
-clinical claim (PROJECT_PLAN.md section 17).
+Three named kits — `watch_only`, `watch_plus_cuff`, `full_home` — are the single source
+of truth for "what a home setup can see", imported by `ml/models/channel_masking.py` so
+training masks and streamed channels cannot drift apart.
 
-`--sink http` streams into a running ingest-gateway, same as the other two replays.
-It was missing here until it was needed: this is the only producer that generates
-*deterioration*, so until it had an HTTP sink the healthy replays could reach the
-alerting engine and the deteriorating one could not. Verified end-to-end against the
-real chain (Kafka + ingest-gateway + stream-processor + risk-engine + alert-service):
-4,386 observations accepted, 5 scored, **1 alert raised** -- `NEWS2 6:
-single-parameter red flag (RCP 2017): hr, spo2 scoring 3`.
+Two rules keep it honest. **Carried-forward hours are never emitted**: `hourly_grid`
+forward-fills and flags it, and an imputed hour means no measurement was taken, so
+streaming it would fabricate an observation that existed in neither domain. **Gaps
+longer than 2h between real anchors are not bridged** — inventing a smooth ramp across a
+real measurement gap is the one fabrication that could flip a trend feature's sign.
 
-```bash
-python simulators/morphing.py --activity STRESS --participant S01 \
-    --duration-s 1800 --start-score 0 --end-score 8 --sink http --no-sleep
-```
+Every Observation carries `quality_flags=[synthetic]`, `device_id="home-kit-sim"` and a
+`Subject/HOME-<stay_id>` reference (never `ICUStay/...` — a patient at home is not an ICU
+stay). Every CLI run prints the section 17 watermark.
+
+`--list-candidates` ranks stays by *escalating hours*, computed through the same shared
+`should_escalate` predicate the alerting engine uses — so a demo cannot be quietly staged
+on a patient who merely looked good.
 
 ## Shared plumbing
 
-- `sinks.py` -- `ConsoleSink` / `JSONLSink`, used by all three replay scripts. A
+- `sinks.py` -- `ConsoleSink` / `JSONLSink`, used by both replay scripts. A
   `KafkaSink` behind the same protocol is Phase 4's `ingest-gateway`'s job.
 - All scripts read/write **derived** artifacts only (`arrival_models.json`,
   `*.jsonl` replay output) -- no raw patient data is written into this directory.

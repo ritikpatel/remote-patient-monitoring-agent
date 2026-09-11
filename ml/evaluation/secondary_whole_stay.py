@@ -13,6 +13,19 @@ is compared against a "must beat NEWS2" bar the way that one is.
 Unlike the hourly task, there is no R1 censoring question here -- each row is
 one ICU stay (or, for readmission, one hospitalisation's last ICU stay), and
 the label is a whole-stay outcome, not a point-in-time event.
+
+**The readmission arm below has been superseded; the mortality arm has not.**
+``ml/evaluation/readmission.py`` rebuilds 30-day readmission on the cohort that
+actually matches the outcome -- every live discharge (252 admissions, 53 positives)
+rather than the 140 ICU stays' own admissions (113, 22) -- and on care-transition
+features rather than the eight ICU-physiology columns used here. Holding the protocol
+fixed and changing only the feature set wins **19 of 20** paired repeats, so this
+script's attribution of its AUROC 0.452 to sample size alone was not right.
+
+What it *was* right about is the destination: even rebuilt, the AUROC interval still
+includes 0.5, so no usable readmission model exists at this cohort size. Both halves
+matter and both are reported in ``readmission_report.md``. The ICU-mortality arm below
+is a different outcome on a different cohort and is untouched by any of that.
 """
 
 from __future__ import annotations

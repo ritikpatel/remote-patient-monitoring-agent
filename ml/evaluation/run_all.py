@@ -44,7 +44,7 @@ import shap  # noqa: E402
 
 from ml.evaluation import fairness, metrics  # noqa: E402
 from ml.features import engineer, labels  # noqa: E402
-from ml.models import baselines, gbm, gru, logistic, splits  # noqa: E402
+from ml.models import baselines, gbm, gru, logistic, serving, splits  # noqa: E402
 
 WAREHOUSE_DB = REPO_ROOT / "warehouse" / "mimic4_demo.db"
 PROMOTED_MODEL_DIR = REPO_ROOT / "ml" / "models" / "promoted"
@@ -464,6 +464,23 @@ def main() -> int:
     print("\nTop 15 SHAP features (promoted model, mean |SHAP|):")
     print(top_shap.to_string())
 
+    # Severity cut-points for the alerting chain, from the promoted model's own
+    # OUT-OF-FOLD predictions at the primary horizon (ml/models/serving.py explains
+    # why out-of-fold and why percentiles). Taken from the CV that already ran rather
+    # than from `final_model`, whose in-sample scores are sharply optimistic and would
+    # push the "high" cut-point far above where real deterioration lands.
+    primary_section = next(s for s in report_sections if s["horizon"] == PRIMARY_HORIZON)
+    # report_sections is a list of heterogeneous dicts, so mypy types every
+    # value as object; "results" is the per-model tuple map.
+    _, _, oof_score_primary, _, _ = primary_section["results"][best_name]  # type: ignore[index]
+    oof_valid = oof_score_primary[~np.isnan(oof_score_primary)]
+    severity_cutpoints = serving.severity_cutpoints_from_scores(oof_valid)
+    print(
+        f"\nSeverity cut-points (OOF, n={severity_cutpoints['n_oof_scores']:,}): "
+        f"medium >= {severity_cutpoints['medium']:.4f}, "
+        f"high >= {severity_cutpoints['high']:.4f}"
+    )
+
     PROMOTED_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(final_model, PROMOTED_MODEL_DIR / "deterioration_model.joblib")
     (PROMOTED_MODEL_DIR / "feature_manifest.json").write_text(
@@ -474,6 +491,8 @@ def main() -> int:
                 "feature_columns": list(x_final_cat.columns),
                 "categorical_columns": gbm._present_categoricals(x_final),
                 "cv_auprc_point_estimate": best_auprc,
+                "severity_cutpoints": severity_cutpoints,
+                "disease_features": engineer.DEFAULT_DISEASE_FEATURES,
                 "top_shap_features": top_shap.to_dict(),
             },
             indent=2,
@@ -532,9 +551,10 @@ def write_report(
     lines = ["# Phase 5 -- predictive models: results\n"]
     lines.append(
         "> This platform is validated on a 100-patient demo subset of MIMIC-IV. "
-        "Clinical narrative is LLM-generated from structured data. Wearable "
-        "deterioration signals are synthetically morphed from healthy-volunteer "
-        "recordings. The engineering is real and the methodology is rigorous, "
+        "Clinical narrative is LLM-generated from structured data. Post-discharge "
+        "signals are real MIMIC physiology passed through a simulated home sensor "
+        "layer, and the post-discharge model is a transfer from ICU data with no "
+        "post-discharge labels. The engineering is real and the methodology is rigorous, "
         "and the clinical performance figures below demonstrate pipeline "
         "validity -- they do not transfer to clinical practice (PROJECT_PLAN.md "
         "section 17).\n"

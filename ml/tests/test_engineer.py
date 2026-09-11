@@ -94,7 +94,15 @@ def _feature_frame(stay_ids: list[int], subject_ids: list[int]) -> pd.DataFrame:
             "first_careunit": ["Medical Intensive Care Unit"] * n,
         }
     )
-    for col in list(engineer.FEATURE_COLUMNS_BASE) + engineer.rolling_feature_columns():
+    for col in (
+        list(engineer.FEATURE_COLUMNS_BASE)
+        + engineer.rolling_feature_columns()
+        # Disease context (warehouse/disease.py) joined the selected column set when
+        # the platform became disease-aware. Read from `engineer` for the same reason
+        # as the other two lists: so this helper keeps working when the default
+        # disease feature set changes, rather than pinning one of them here.
+        + engineer.disease_feature_columns()
+    ):
         if col not in frame.columns:
             frame[col] = 1.0
     return frame

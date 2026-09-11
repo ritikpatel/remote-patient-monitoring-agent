@@ -253,3 +253,158 @@ def test_escalation_decider_works_without_an_llm_configured(known_high_tier_stay
     result = node({"stay_id": stay_id, "hour": hour, "risk_score": risk_response})
     assert result["escalate"] is True
     assert result["llm_advisory"] is None
+
+
+# ---------------------------------------------------------------------------
+# Disease awareness: DiseaseContext, and the CarePlanner gate
+# ---------------------------------------------------------------------------
+
+
+class TestDiseaseContextNode:
+    def test_loads_the_real_diagnosis_and_comorbidities_for_a_stay(
+        self, deps, known_high_tier_stay
+    ):
+        from nodes import disease_context
+
+        stay_id, hour = known_high_tier_stay
+        out = disease_context(deps)({"stay_id": stay_id, "hour": hour})
+
+        ctx = out["disease_context"]
+        assert ctx["hadm_id"] is not None, "ContextRetriever needs this to scope note retrieval"
+        assert ctx["dx_chapter"], "the grouping key for per-disease thresholds"
+        assert isinstance(ctx["comorbidities"], list)
+
+    def test_an_unknown_stay_degrades_to_disease_blind_rather_than_raising(self, deps):
+        """A wearable volunteer has no ICU stay, no chart and no diagnosis. The graph
+        must still run for them -- disease-blind, exactly as it behaved before this
+        node existed -- rather than failing the whole assessment."""
+        from nodes import disease_context
+
+        out = disease_context(deps)({"stay_id": -1, "hour": 0})
+
+        assert out["disease_context"] == {}
+
+
+class TestCarePlannerGate:
+    """Two gates of different kinds: `escalate` is the deterministic NEWS2 policy,
+    `severity` is the learned model's grade. Both must hold, and a skip must say
+    which one failed rather than silently producing nothing.
+    """
+
+    @staticmethod
+    def _state(**overrides) -> dict:
+        base = {
+            "escalate": True,
+            "severity": "high",
+            "disease_context": {"dx_title": "Sepsis, unspecified organism"},
+            "context_passages": [{"text": "a passage", "passage_id": "G003", "fact_ids": []}],
+            "escalation_reason": "ICU-recalibrated NEWS2 tier is 'high'",
+            "vitals": {},
+            "abnormal_labs": [],
+            "ml_risk": {"probability": 0.9},
+        }
+        return {**base, **overrides}
+
+    def test_no_plan_when_the_deterministic_policy_did_not_escalate(self, deps):
+        from nodes import care_planner
+
+        out = care_planner(deps)(self._state(escalate=False))
+
+        assert out["care_plan"] is None
+        assert "did not escalate" in out["care_plan_skipped_reason"]
+
+    def test_no_plan_when_the_model_grades_below_high(self, deps):
+        from nodes import care_planner
+
+        out = care_planner(deps)(self._state(severity="medium"))
+
+        assert out["care_plan"] is None
+        assert "medium" in out["care_plan_skipped_reason"]
+
+    def test_an_ungraded_alert_is_reported_as_ungraded_not_as_low(self, deps):
+        """`severity=None` means no promoted model exists. That is a different state
+        from "the model says low", and collapsing them would hide the fact that
+        nothing graded the alert at all."""
+        from nodes import care_planner
+
+        out = care_planner(deps)(self._state(severity=None))
+
+        assert out["care_plan"] is None
+        assert "not graded" in out["care_plan_skipped_reason"]
+
+    def test_a_high_severity_escalation_produces_a_plan_with_citations(self, deps):
+        from nodes import care_planner
+
+        out = care_planner(deps)(self._state())
+
+        plan = out["care_plan"]
+        assert plan is not None
+        assert out["care_plan_skipped_reason"] is None
+        assert plan["condition"] == "Sepsis, unspecified organism"
+        assert plan["generated"] is True
+        assert [c["passage_id"] for c in plan["citations"]] == ["G003"]
+
+    def test_the_no_llm_path_is_labelled_and_invents_nothing(self, tmp_path, deps):
+        """With no LLM the node must still produce something usable, and must mark it
+        as not-generated so a reader never mistakes a template for clinical
+        reasoning."""
+        from dataclasses import replace
+
+        from nodes import care_planner
+
+        out = care_planner(replace(deps, llm=None))(self._state())
+
+        plan = out["care_plan"]
+        assert plan["generated"] is False
+        assert "no LLM configured" in plan["recommended_actions"]
+
+
+class TestRiskScorerSeverity:
+    def test_the_deterministic_score_survives_an_unavailable_ml_model(
+        self, deps, known_high_tier_stay
+    ):
+        """A 503 from /score/ml (no promoted model exported) must leave the
+        deterministic NEWS2 path completely untouched -- that path is what escalation
+        is decided on, and it cannot depend on the learned model existing."""
+        stay_id, hour = known_high_tier_stay
+
+        out = risk_scorer(deps)({"stay_id": stay_id, "hour": hour})
+
+        assert out["risk_score"]["news2"] is not None
+        assert out["risk_score"]["escalation_recommended"] is not None
+        # severity may or may not be gradeable depending on whether a model is
+        # exported in this checkout; either way it must be an explicit value.
+        assert "severity" in out
+        assert out["severity_source"]
+
+
+class TestContextRetrieverScoping:
+    def test_note_passages_come_only_from_this_patients_admission(self, deps, known_high_tier_stay):
+        """The bug this prevents was real: an unscoped corpus search returned whichever
+        admission's discharge summary used the query words most densely, so the agent
+        retrieved ANOTHER patient's chart and summarised it under this patient's name.
+        """
+        from nodes import context_retriever, disease_context
+
+        stay_id, hour = known_high_tier_stay
+        state = {"stay_id": stay_id, "hour": hour, "risk_score": {"reason": []}}
+        state.update(disease_context(deps)(state))
+        hadm_id = state["disease_context"]["hadm_id"]
+
+        out = context_retriever(deps)(state)
+
+        note_hadm_ids = {p["hadm_id"] for p in out["context_passages"] if p["source"] == "note"}
+        assert note_hadm_ids <= {hadm_id}, "a note from another admission leaked in"
+
+    def test_guidelines_are_still_retrieved_corpus_wide(self, deps, known_high_tier_stay):
+        """Scoping notes by admission must not also drop the guideline half -- a care
+        plan needs the general clinical convention alongside this patient's specifics."""
+        from nodes import context_retriever, disease_context
+
+        stay_id, hour = known_high_tier_stay
+        state = {"stay_id": stay_id, "hour": hour, "risk_score": {"reason": []}}
+        state.update(disease_context(deps)(state))
+
+        out = context_retriever(deps)(state)
+
+        assert any(p["source"] == "guideline" for p in out["context_passages"])

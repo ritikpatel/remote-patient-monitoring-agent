@@ -89,20 +89,105 @@ class EmailResult:
         }
 
 
-def compose(patient_ref: str, headline: str, detail: str) -> EmailContent:
-    """Same two arguments `sms.compose` takes, for the same reason: both
-    channels are fed by the same two callers (notification-gateway's real
-    send, event-studio's zero-network preview) with the same two pieces of
-    information -- a short escalation label and the reason."""
+def compose(
+    patient_ref: str,
+    headline: str,
+    detail: str,
+    assessment: dict | None = None,
+) -> EmailContent:
+    """Same first three arguments `sms.compose` takes, for the same reason: both
+    channels are fed by the same callers (notification-gateway's real send,
+    event-studio's zero-network preview) with the same information -- a short
+    escalation label and the reason.
+
+    `assessment` is agent-orchestrator's `/assess` payload, and it is what turns
+    this from a number into something a clinician can act on. Before it, the entire
+    email was "NEWS2 9: ICU-recalibrated NEWS2 tier is 'high'" -- true, and nearly
+    useless at 3am, because it says nothing about *who* this patient is or *what to
+    do*. With it the body carries the diagnosis, the chronic comorbidities, which
+    threshold escalated (disease-specific or pooled), the learned model's severity
+    grade, and the grounded care plan.
+
+    Email is deliberately the channel that carries the full plan; `sms.compose`
+    stays short. A care plan is several hundred characters of clinical prose --
+    right for an inbox, wrong for a text message that gets truncated mid-sentence.
+
+    Kept a pure function of its arguments: no network, no environment reads. That is
+    what lets event-studio render an exact preview of a real escalation email
+    without sending one.
+    """
     subject = f"{DRILL_MARKER} Deterioration alert -- {patient_ref}"
-    body = (
-        f"{DRILL_MARKER}\n\n"
-        f"Patient: {patient_ref}\n"
-        f"Escalation: {headline}\n"
-        f"Reason: {detail}\n\n"
-        "This message describes no real patient. Not a real clinical alert."
-    )
-    return EmailContent(subject=subject, body=body)
+    lines = [
+        DRILL_MARKER,
+        "",
+        f"Patient: {patient_ref}",
+        f"Escalation: {headline}",
+        f"Reason: {detail}",
+    ]
+
+    if assessment and assessment.get("assessable"):
+        lines += ["", "-- Clinical context " + "-" * 40]
+        condition = assessment.get("condition")
+        if condition:
+            lines.append(f"Condition: {condition}")
+        if assessment.get("dx_chapter"):
+            lines.append(f"Diagnosis group: {assessment['dx_chapter']}")
+        comorbidities = assessment.get("comorbidities") or []
+        if comorbidities:
+            lines.append(f"Chronic comorbidities: {', '.join(comorbidities)}")
+        if assessment.get("charlson_comorbidity_index") is not None:
+            lines.append(f"Charlson index: {assessment['charlson_comorbidity_index']}")
+
+        lines += ["", "-- Risk " + "-" * 52]
+        if assessment.get("news2") is not None:
+            tier_note = (
+                f"disease-specific threshold ({assessment.get('dx_group')})"
+                if assessment.get("threshold_is_disease_specific")
+                else "pooled ICU threshold"
+            )
+            lines.append(
+                f"NEWS2 {assessment['news2']} -- tier "
+                f"'{assessment.get('news2_tier_icu')}' on the {tier_note}"
+            )
+        if assessment.get("severity"):
+            prob = assessment.get("ml_probability")
+            prob_str = f" (p={prob:.3f})" if isinstance(prob, int | float) else ""
+            lines.append(f"Model severity: {str(assessment['severity']).upper()}{prob_str}")
+        # The model's validated scope is only the first 6 ICU hours. A score from
+        # outside it must not reach a clinician looking like one from inside it --
+        # ml/models/serving.py carries the measurement this warning is drawn from.
+        if assessment.get("ml_in_validated_scope") is False and assessment.get("ml_scope_note"):
+            lines.append(f"CAUTION: {assessment['ml_scope_note']}")
+
+        care_plan = assessment.get("care_plan")
+        if care_plan:
+            lines += ["", "-- Suggested actions " + "-" * 39]
+            lines.append(str(care_plan.get("recommended_actions", "")).strip())
+            if not care_plan.get("generated"):
+                lines.append(
+                    "\n(Deterministic fallback -- no LLM was configured; "
+                    "no clinical reasoning was generated.)"
+                )
+            citations = care_plan.get("citations") or []
+            if citations:
+                fact_ids = sorted({f for c in citations for f in (c.get("fact_ids") or [])})
+                sources = ", ".join(
+                    str(c.get("passage_id")) for c in citations if c.get("passage_id")
+                )
+                lines.append(f"\nGrounded in: {sources}")
+                if fact_ids:
+                    lines.append(f"Fact ledger ids: {', '.join(fact_ids)}")
+        elif assessment.get("care_plan_skipped_reason"):
+            lines += ["", str(assessment["care_plan_skipped_reason"])]
+
+        if assessment.get("summary"):
+            lines += ["", "-- Summary " + "-" * 49, str(assessment["summary"]).strip()]
+
+    lines += [
+        "",
+        "This message describes no real patient. Not a real clinical alert.",
+    ]
+    return EmailContent(subject=subject, body="\n".join(lines))
 
 
 class Transport(Protocol):

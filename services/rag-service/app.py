@@ -53,8 +53,10 @@ class SearchResultOut(BaseModel):
 
 
 @app.get("/search", response_model=list[SearchResultOut])
-def search(q: str, k: int = 5, source: str | None = None) -> list[SearchResultOut]:
-    results = get_index().search(q, k=k, source=source)
+def search(
+    q: str, k: int = 5, source: str | None = None, hadm_id: int | None = None
+) -> list[SearchResultOut]:
+    results = get_index().search(q, k=k, source=source, hadm_id=hadm_id)
     return [
         SearchResultOut(
             passage_id=r.passage.passage_id,

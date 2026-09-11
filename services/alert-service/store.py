@@ -167,6 +167,28 @@ class AlertStore:
             self.conn.commit()
             return self.get(alert_id)
 
+    def regrade(self, alert_id: int, severity: str) -> Alert:
+        """Set an alert's severity from the learned model's grade.
+
+        Separate from `escalate`/`suppress` because it changes a different axis:
+        those move `status` (is this alert still live), this moves `severity` (how
+        bad is it). The alert was raised by the deterministic NEWS2 policy, which
+        knows *that* a patient is deteriorating but grades every alert it raises
+        identically -- `EscalationLoop` hardcodes "high" on all of them. The learned
+        model is what distinguishes them, and it can only do so after the alert
+        exists, because grading requires a scored (stay_id, hour) that the raising
+        path does not have.
+
+        The rewrite is deliberate and recorded rather than hidden: the severity a
+        clinician sees on the dashboard must match the severity that decided whether
+        they were paged, and leaving the row at "high" while paging on a model grade
+        of "low" would make those two disagree.
+        """
+        with self._lock:
+            self.conn.execute("UPDATE alerts SET severity = ? WHERE id = ?", (severity, alert_id))
+            self.conn.commit()
+            return self.get(alert_id)
+
     def acknowledge(
         self, alert_id: int, acknowledged_by: str, timestamp: datetime | None = None
     ) -> Alert:

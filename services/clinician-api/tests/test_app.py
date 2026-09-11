@@ -221,7 +221,10 @@ def test_get_agent_assessment_runs_the_real_graph():
     body = resp.json()
     assert "escalate" in body
     assert "context_passages" in body
-    assert len(body["audit_rows"]) == 6
+    assert "disease_context" in body
+    # One audit row per graph node. Eight since DiseaseContext and CarePlanner
+    # joined section 10's original six -- services/agent-orchestrator/graph.py.
+    assert len(body["audit_rows"]) == 8
 
 
 def test_get_active_alerts_spans_every_patient(wired_dependencies):

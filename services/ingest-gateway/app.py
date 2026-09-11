@@ -1,7 +1,7 @@
 """ingest-gateway: MQTT + REST ingress, schema validation, auth -> Kafka `raw.*`.
 
 PROJECT_PLAN.md section 10. Every producer this project has (simulators/real_event_replay.py,
-simulators/wearable_replay.py, simulators/morphing.py, edge/edge_agent/) emits
+simulators/home_kit_stream.py, edge/edge_agent/) emits
 services.contracts.observation.Observation -- schema validation here is simply
 "does this parse as an Observation," which FastAPI/Pydantic does automatically on
 the REST path and `handle_mqtt_message` does explicitly on the MQTT path.

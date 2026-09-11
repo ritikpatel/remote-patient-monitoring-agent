@@ -1,8 +1,9 @@
 # System workflow: health event in, alert out
 
 > This platform is validated on a 100-patient demo subset of MIMIC-IV. Clinical
-> narrative is LLM-generated from structured data. Wearable deterioration
-> signals are synthetically morphed from healthy-volunteer recordings. The
+> narrative is LLM-generated from structured data. Post-discharge signals are real
+> MIMIC physiology passed through a simulated home sensor layer, and the
+> post-discharge model is a transfer from ICU data with no post-discharge labels. The
 > engineering is real and the methodology is rigorous; the clinical
 > performance figures demonstrate pipeline validity and do not transfer to
 > clinical practice (PROJECT_PLAN.md section 17).
@@ -22,7 +23,7 @@ inventory.
 **1. `EscalationLoop` is one class with two entry points, and both run the
 same score → alert code.** `on_observation()` is triggered per Kafka message
 (the async, always-on path — throttled to 15 stream-minutes per patient so a
-64Hz wearable stream doesn't hammer risk-engine). `run_now()` is a one-shot
+high-rate home-kit stream doesn't hammer risk-engine). `run_now()` is a one-shot
 synchronous call for a caller that already has a complete vitals dict —
 `event-studio`'s composed events — and skips the throttle since there is no
 stream to throttle. Same score → alert sequence, same real services, same
@@ -53,7 +54,7 @@ channel this project demonstrates live; SMS needs a funded Twilio account, so
 it stays wired and independently configurable for whenever that exists.
 
 Both paths — the always-on deterministic one and the on-demand agentic one
-(`agent-orchestrator`'s six-node LangGraph, run per patient, not per
+(`agent-orchestrator`'s eight-node LangGraph, run per patient, not per
 observation, because it makes a real LLM call) — still share the same
 `should_escalate()` predicate (the orange hexagon below) so they can never
 disagree about whether to escalate. That sharing is itself the fix for an
@@ -79,8 +80,7 @@ flowchart TD
     subgraph INPUTS["① Event sources — all producers satisfy one Observation contract"]
         direction LR
         ICU["real_event_replay.py\nICU monitor replay"]
-        WR["wearable_replay.py\nhealthy volunteer, never alerts"]
-        MORPH["morphing.py\nsynthetic deterioration"]
+        WR["home_kit_stream.py\nreal deterioration, simulated device"]
         WATCH["Wear OS watch\nBLE GATT peripheral"]
         EDGE["edge_agent\nfeatures + SQLite outbox"]
         STUDIO["event-studio (browser)\ncompose severity → event\n(local should_escalate preview)"]
@@ -89,7 +89,6 @@ flowchart TD
     OBS{{"Observation contract\npatient_ref · LOINC code · value · quality_flags"}}
     ICU --> OBS
     WR --> OBS
-    MORPH --> OBS
     EDGE --> OBS
     STUDIO --> OBS
 
@@ -222,7 +221,6 @@ flowchart TD
     classDef demo fill:#fdf4ff,stroke:#c026d3,color:#701a75,stroke-dasharray: 4 2;
     classDef live fill:#ecfdf5,stroke:#059669,color:#064e3b,stroke-width:2px;
 
-    class ICU,WR,MORPH,WATCH,EDGE,STUDIO,OBS input;
     class GW,MQTTB,KAFKA bus;
     class SP,WIN,LOOP,RE_LIVE stream;
     class RE_DET,RE_ML score;
@@ -301,5 +299,5 @@ inside them.
 | ⑦ Consumers | [`ui/README.md`](../ui/README.md) |
 | ⑧ Clinical export | [`reports/README.md`](../reports/README.md), `infra/compose/README.md`'s HAPI FHIR section |
 | Scoring numbers | [`ml/README.md`](../ml/README.md), [`ml/evaluation/report.md`](../ml/evaluation/report.md) |
-| Two arms, one policy gap | [`docs/two_arm_alignment.md`](two_arm_alignment.md) |
+| Post-discharge transfer bound | [`ml/evaluation/home_kit_transfer_report.md`](../ml/evaluation/home_kit_transfer_report.md) |
 | The double-notify bug (F7) | `services/stream-processor/escalation.py` and `services/alert-service/app.py` module docstrings, `VALIDATION_REPORT.md`'s scope note |

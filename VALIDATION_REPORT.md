@@ -1,5 +1,17 @@
 # Independent validation report
 
+> **Status note added after this validation was written.** The wearable arm described
+> below has since been **removed from the project**. The PhysioNet volunteer dataset
+> (healthy subjects, median age ~21, zero deterioration events) could never contain the
+> outcome the platform predicts, so finding **E10 is retired** and the local copy was
+> deleted. `simulators/wearable_replay.py` and `simulators/morphing.py` were retired
+> with it, replaced by `simulators/home_kit_stream.py`, which streams a **real
+> deteriorating MIMIC patient** through a simulated home sensor layer. Every wearable
+> result recorded below was genuinely verified at the time and is left as written; the
+> post-discharge arm's current, measured bound is in
+> `ml/evaluation/home_kit_transfer_report.md`.
+
+
 **Reviewer:** Opus 5 · **Date:** 2026-09-08 · **Subject:** Phases 0–8 as built by Sonnet-5
 **Method:** every claim re-run locally from a clean tree. Nothing below is taken from a README
 without being independently reproduced, except the three items listed under "Not re-verified".
@@ -554,7 +566,7 @@ below), the guarded SMS sender it originally carried (moved to
 `services/common/sms.py` once it gained a second real caller), and
 `ml/evaluation/channel_dropout.py` (prediction-time channel masking on the
 promoted model, which settled the "one model or two" question for the
-post-discharge arm — see `docs/two_arm_alignment.md` §A2 and
+post-discharge arm — see `ml/evaluation/home_kit_transfer_report.md` and
 `ml/evaluation/channel_dropout_report.md`). None were independently re-verified
 by a reviewer the way F1-F6 were; they are recorded here so this report's
 scope boundary stays explicit rather than silently going stale.
