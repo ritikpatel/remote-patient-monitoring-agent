@@ -149,10 +149,6 @@ def csv_columns(conn: duckdb.DuckDBPyConnection, path: Path) -> list[str]:
     return [d[0] for d in conn.description]
 
 
-def has_subject_id(conn: duckdb.DuckDBPyConnection, table: str) -> bool:
-    return "subject_id" in declared_columns(conn, table)
-
-
 # --------------------------------------------------------------------------
 # Cohort selection
 # --------------------------------------------------------------------------
@@ -265,7 +261,7 @@ def load_table_filtered(
     cast_list = ", ".join(f'CAST("{c}" AS {declared[c]}) AS "{c}"' for c in shared)
     where = ""
     if "subject_id" in declared:
-        where = "WHERE CAST(subject_id AS BIGINT) IN " f"(SELECT subject_id FROM {COHORT_TABLE})"
+        where = f"WHERE CAST(subject_id AS BIGINT) IN (SELECT subject_id FROM {COHORT_TABLE})"
 
     conn.execute(f"DELETE FROM {table}")
     conn.execute(
